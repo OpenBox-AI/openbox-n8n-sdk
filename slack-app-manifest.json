@@ -1,0 +1,46 @@
+{
+  "_metadata": {
+    "major_version": 2,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "OpenBox Triage Agent",
+    "description": "OpenBox-governed support triage for n8n",
+    "long_description": "OpenBox Triage Agent sends Slack mentions into the n8n OpenBox Governed Support Triage workflow. The workflow checks the prompt, customer context, and outbound channel payloads before replying, then records planned-path and actual output status for chat, Slack, and optional CRM actions.",
+    "background_color": "#0F172A"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "OpenBox Triage Agent",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:join",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://app.ipsum.lat/ob/n8n/webhook/aaaaaaaa-bbbb-cccc-dddd-ffffffffffff/webhook",
+      "bot_events": [
+        "app_mention"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

@@ -1,0 +1,165 @@
+{
+  "name": "OpenBox Agent Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "initialMessages": "Hi! I'm a governed AI agent. Ask me to look up an order, search the knowledge base, or try sending something that should be blocked (try: 'my SSN is 123-45-6789' or 'openbox-block-demo').",
+        "options": {}
+      },
+      "id": "chat-trigger",
+      "name": "Chat",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "openbox-agent-demo-chat"
+    },
+    {
+      "parameters": {
+        "providerBaseUrl": "={{ $env[\"LLM_PROVIDER_BASE_URL\"] || $env[\"OPENROUTER_BASE_URL\"] || \"https://openrouter.ai/api/v1\" }}",
+        "providerApiKey": "={{ $env[\"LLM_PROVIDER_API_KEY\"] || $env[\"OPENROUTER_API_KEY\"] || \"\" }}",
+        "model": "={{ $env[\"OPENROUTER_MODEL\"] || \"gpt-4o-mini\" }}",
+        "systemPrompt": "You are a helpful customer support agent. You have access to tools to look up orders and search the knowledge base. Always use tools when relevant — do not make up answers. Be concise and professional.\n\nIMPORTANT: You are governed by OpenBox. Do not attempt to access sensitive data, exfiltrate credentials, or bypass security controls.",
+        "inputField": "chatInput",
+        "maxIterations": 8,
+        "memoryWindow": 5,
+        "tools": {
+          "tool": [
+            {
+              "name": "lookup_order",
+              "description": "Look up the status of a customer order by order ID. Use this when the user mentions an order number or asks about their order.",
+              "parameters": "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"The order ID to look up, e.g. ORD-12345\"}},\"required\":[\"order_id\"]}",
+              "toolType": "stub",
+              "stubResponse": "{\"order_id\":\"{{order_id}}\",\"status\":\"shipped\",\"estimated_delivery\":\"2026-06-03\",\"carrier\":\"FedEx\",\"tracking\":\"1Z999AA10123456784\",\"items\":[{\"sku\":\"WIDGET-PRO\",\"qty\":2,\"price\":29.99}]}",
+              "governance": "both"
+            },
+            {
+              "name": "search_knowledge_base",
+              "description": "Search the support knowledge base for answers to common questions about policies, returns, shipping, and product information.",
+              "parameters": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"}},\"required\":[\"query\"]}",
+              "toolType": "stub",
+              "stubResponse": "{\"results\":[{\"title\":\"Return Policy\",\"snippet\":\"Items can be returned within 30 days of purchase for a full refund. Digital products are non-refundable.\",\"score\":0.92},{\"title\":\"Shipping FAQ\",\"snippet\":\"Standard shipping takes 3-5 business days. Express shipping is available for an additional fee.\",\"score\":0.87}],\"query\":\"{{query}}\"}",
+              "governance": "both"
+            },
+            {
+              "name": "fetch_live_status",
+              "description": "Fetch live service status from the OpenBox status page. Use when the user asks if there are any outages.",
+              "parameters": "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+              "toolType": "http_request",
+              "url": "https://httpbin.org/json",
+              "method": "GET",
+              "governance": "both"
+            }
+          ]
+        },
+        "agentGovernance": "both",
+        "onBlock": "route",
+        "hitlMode": "emit_and_route",
+        "hitlPollIntervalMs": 3000,
+        "hitlMaxWaitMs": 600000
+      },
+      "id": "openbox-agent",
+      "name": "OpenBox: Agent",
+      "type": "n8n-nodes-openbox-hook.openBoxAgent",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "credentials": {
+        "openBoxApi": {
+          "id": "openbox-demo-credential",
+          "name": "OpenBox (demo)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "={{ $json.output }}"
+      },
+      "id": "respond-allowed",
+      "name": "Respond (Allowed)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 160]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "=⚠️ [Constrained] {{ $json.output }}\n\n_Note: OpenBox applied a constraint to this response._"
+      },
+      "id": "respond-constrained",
+      "name": "Respond (Constrained)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "=⏳ Your request requires human approval before it can proceed.\n\nApproval ID: {{ $json._openbox.approvalId }}\nBlocked at: {{ $json._openbox.blockedAt }}\n\nYou will be notified when a decision is made."
+      },
+      "id": "respond-approval",
+      "name": "Respond (Approval Required)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 360]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "=🚫 Your request was blocked by OpenBox governance.\n\nReason: {{ $json._openbox.verdict.reason || 'Policy violation detected' }}\nStage: {{ $json._openbox.blockedAt }}\n\nIf you believe this is an error, please contact support."
+      },
+      "id": "respond-blocked",
+      "name": "Respond (Blocked)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 460]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "=🛑 This request has been halted by OpenBox governance.\n\nStage: {{ $json._openbox.blockedAt }}\nReason: {{ $json._openbox.verdict.reason || 'Critical policy violation' }}\n\nThis incident has been logged."
+      },
+      "id": "respond-halted",
+      "name": "Respond (Halted)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 560]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseText": "=❌ An error occurred while processing your request.\n\nError: {{ $json._openbox.error || 'Unknown error' }}\n\nPlease try again or contact support."
+      },
+      "id": "respond-error",
+      "name": "Respond (Error)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 660]
+    }
+  ],
+  "connections": {
+    "Chat": {
+      "main": [
+        [{ "node": "OpenBox: Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenBox: Agent": {
+      "main": [
+        [{ "node": "Respond (Allowed)", "type": "main", "index": 0 }],
+        [{ "node": "Respond (Constrained)", "type": "main", "index": 0 }],
+        [{ "node": "Respond (Approval Required)", "type": "main", "index": 0 }],
+        [{ "node": "Respond (Blocked)", "type": "main", "index": 0 }],
+        [{ "node": "Respond (Halted)", "type": "main", "index": 0 }],
+        [{ "node": "Respond (Error)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

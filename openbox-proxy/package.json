@@ -1,0 +1,16 @@
+{
+  "name": "openbox-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forward HTTP proxy that pre-checks every outbound n8n request with OpenBox and blocks on non-allow verdicts (gaps.md GAP-16).",
+  "license": "MIT",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "vitest run --config vitest.config.js"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
