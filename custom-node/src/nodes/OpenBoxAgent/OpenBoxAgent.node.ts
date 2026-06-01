@@ -321,10 +321,22 @@ export class OpenBoxAgent implements INodeType {
             const raw = await middleware.wrapToolCall(toolCall.name, toolCall.args, () =>
               tool.invoke(toolCall.args),
             );
-            toolResult = typeof raw === 'string' ? raw : JSON.stringify(raw);
+            // null/undefined (e.g. HTTP node with empty/null response body) → empty string
+            // so the LLM receives a ToolMessage with valid content instead of crashing.
+            if (raw == null) {
+              toolResult = '';
+            } else {
+              toolResult = typeof raw === 'string' ? raw : JSON.stringify(raw);
+            }
           } catch (err) {
+            // Governance errors (halt/block) end the execution immediately.
             mapGovernanceError(err, this, i);
-            throw err;
+            // Non-governance errors (HTTP 4xx/5xx, timeout, parse failure, etc.):
+            // feed the error back as the tool result so the LLM can respond
+            // gracefully. Throwing here causes n8n to leave the execution in a
+            // perpetual "running" state because the error bypasses the normal
+            // after_agent/WorkflowCompleted path.
+            toolResult = `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
 
           messages.push(makeToolMessage(toolResult, toolCall.id, toolCall.name));
