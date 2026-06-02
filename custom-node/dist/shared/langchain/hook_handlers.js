@@ -21,8 +21,6 @@ async function handleBeforeAgent(mw, state, threadId = 'n8n') {
     const turn = (0, types_1.hexId)(32);
     mw._workflowId = `${threadId}-${turn.slice(0, 8)}`;
     mw._runId = `${threadId}-run-${turn.slice(8, 16)}`;
-    mw._firstLlmCall = true;
-    mw._preScreenResponse = null;
     mw._client.updateTraceId(mw._workflowId);
     const messages = state.messages ?? [];
     const userPrompt = (0, hooks_1.extractLastUserMessage)(messages);
@@ -59,7 +57,7 @@ async function handleBeforeAgent(mw, state, threadId = 'n8n') {
 // ═══════════════════════════════════════════════════════════════════
 // handle_after_agent → WorkflowCompleted
 // ═══════════════════════════════════════════════════════════════════
-async function handleAfterAgent(mw, state) {
+async function handleAfterAgent(mw, state, failedWith) {
     if (!mw._config.sendChainEndEvent)
         return null;
     const messages = state.messages ?? [];
@@ -68,27 +66,34 @@ async function handleAfterAgent(mw, state) {
         const lastMsg = messages[messages.length - 1];
         lastContent = lastMsg?.content ?? null;
     }
-    return (0, hooks_1.evaluate)(mw, {
+    const verdict = await (0, hooks_1.evaluate)(mw, {
         ...(0, hooks_1.baseEventFields)(mw),
         event_type: 'WorkflowCompleted',
         activity_id: `${mw._runId}-wf`,
         activity_type: mw._workflowType,
         workflow_output: (0, types_1.safeSerialize)({ result: lastContent }),
-        status: 'completed',
+        status: failedWith ? 'failed' : 'completed',
+        ...(failedWith ? { error: failedWith.message } : {}),
     });
+    // Clean up any lingering activity registrations for this workflow.
+    // Mirrors Python SDK's span_processor.unregister_workflow(workflow_id).
+    (0, span_processor_1.unregisterWorkflow)(mw._workflowId);
+    return verdict;
 }
 // ═══════════════════════════════════════════════════════════════════
 // handle_wrap_model_call → LLMStarted → PII redact → Model → LLMCompleted
 // ═══════════════════════════════════════════════════════════════════
 async function handleWrapModelCall(mw, messages, handler) {
-    const promptText = (0, hooks_1.extractPromptFromMessages)(messages);
+    // Use only the last human message as the governed prompt — extractPromptFromMessages
+    // would join ALL human messages including chat history loaded from memory, producing
+    // a concatenated blob of prior turns instead of the current user input.
+    const promptText = (0, hooks_1.extractLastUserMessage)(messages) ?? (0, hooks_1.extractPromptFromMessages)(messages);
     if (!promptText.trim())
         return handler();
     const b = (0, hooks_1.baseEventFields)(mw);
     const activityId = (0, types_1.hexId)(32);
     let startResponse;
     const startMs = Date.now();
-    mw._firstLlmCall = false;
     if (mw._config.sendLlmStartEvent) {
         startResponse = await (0, hooks_1.evaluate)(mw, {
             ...b,
@@ -102,12 +107,27 @@ async function handleWrapModelCall(mw, messages, handler) {
     else {
         startResponse = null;
     }
-    // PII redaction — mutate messages before handing to the model
+    // PII redaction — only apply when the returned text is ≤ the prompt we sent.
+    // Redaction removes/replaces content; it never expands it. If Core returns a
+    // longer string it is echoing stale data from a prior session — applying it
+    // would overwrite the current user message with a concatenation of past turns.
     const guardrails = startResponse?.guardrails_result ?? startResponse?.guardrailsResult;
     if (guardrails) {
         const gr = guardrails;
         if (gr.input_type === 'activity_input' && gr.redacted_input != null) {
-            (0, hooks_1.applyPiiRedaction)(messages, gr.redacted_input);
+            const ri = gr.redacted_input;
+            const redactedStr = typeof ri === 'string' ? ri
+                : Array.isArray(ri) && ri.length > 0
+                    ? (typeof ri[0] === 'string'
+                        ? ri[0]
+                        : (typeof ri[0] === 'object' && ri[0] !== null
+                            ? (ri[0].prompt ?? null)
+                            : null))
+                    : null;
+            // Allow 64 chars slack for replacements like "[SSN]" → "[REDACTED-SSN]"
+            if (redactedStr == null || redactedStr.length <= promptText.length + 64) {
+                (0, hooks_1.applyPiiRedaction)(messages, gr.redacted_input);
+            }
         }
     }
     // Enforce LLMStarted verdict (block/halt throw; require_approval polls)
@@ -183,13 +203,20 @@ async function handleWrapMemoryOp(mw, opType, fn) {
     const activityId = (0, types_1.hexId)(32);
     const startMs = Date.now();
     const b = (0, hooks_1.baseEventFields)(mw);
-    // Register the activity so db/file hooks inside the memory op can emit
-    // hook_trigger span payloads. The first hook_trigger (db_query started) acts
-    // as the ActivityStarted node on the Core dashboard — exactly how http hooks
-    // work for llm_call. We intentionally do NOT send an explicit evaluate()
-    // ActivityStarted here: doing so created a duplicate "started" node because
-    // Core also renders each hook_trigger payload (which carries event_type:
-    // 'ActivityStarted' from the registered context) as a timeline node.
+    // Send explicit ActivityStarted evaluate BEFORE registering the activity.
+    // This creates an anchor node in Core's timeline so subsequent DB hook_triggers
+    // (hook_trigger:true, stage:'started'|'completed') are grouped under it
+    // instead of each creating their own ActivityStarted node. Mirrors how
+    // LLMStarted anchors HTTP spans for llm_call activities.
+    try {
+        await (0, hooks_1.evaluate)(mw, {
+            ...b,
+            event_type: 'ActivityStarted',
+            activity_id: activityId,
+            activity_type: opType,
+        });
+    }
+    catch { /* non-fatal */ }
     (0, span_processor_1.registerActivity)(activityId, {
         ...b,
         event_type: 'ActivityStarted',

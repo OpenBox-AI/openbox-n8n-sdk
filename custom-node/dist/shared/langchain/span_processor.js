@@ -30,6 +30,7 @@ exports.registerActivity = registerActivity;
 exports.runWithActivity = runWithActivity;
 exports.clearActivityAbort = clearActivityAbort;
 exports.unregisterActivity = unregisterActivity;
+exports.unregisterWorkflow = unregisterWorkflow;
 const node_async_hooks_1 = require("node:async_hooks");
 const openbox_client_1 = require("../openbox-client");
 const types_1 = require("./types");
@@ -473,4 +474,18 @@ function clearActivityAbort(activityId) {
 function unregisterActivity(activityId) {
     _activeActivities.delete(activityId);
     _activityAbort.delete(activityId);
+}
+/**
+ * Remove all lingering activity registrations for a completed workflow.
+ * Mirrors Python's span_processor.unregister_workflow(workflow_id).
+ * Called from handleAfterAgent as a safety net — individual activities should
+ * already be cleaned up by their own unregisterActivity() calls.
+ */
+function unregisterWorkflow(workflowId) {
+    for (const [activityId, entry] of _activeActivities) {
+        if (entry.ctx.workflow_id === workflowId) {
+            _activeActivities.delete(activityId);
+            _activityAbort.delete(activityId);
+        }
+    }
 }

@@ -561,3 +561,18 @@ export function unregisterActivity(activityId: string): void {
   _activeActivities.delete(activityId);
   _activityAbort.delete(activityId);
 }
+
+/**
+ * Remove all lingering activity registrations for a completed workflow.
+ * Mirrors Python's span_processor.unregister_workflow(workflow_id).
+ * Called from handleAfterAgent as a safety net — individual activities should
+ * already be cleaned up by their own unregisterActivity() calls.
+ */
+export function unregisterWorkflow(workflowId: string): void {
+  for (const [activityId, entry] of _activeActivities) {
+    if (entry.ctx.workflow_id === workflowId) {
+      _activeActivities.delete(activityId);
+      _activityAbort.delete(activityId);
+    }
+  }
+}

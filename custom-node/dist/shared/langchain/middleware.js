@@ -24,8 +24,6 @@ class OpenBoxLangChainMiddleware {
     _workflowId = '';
     _runId = '';
     _workflowType;
-    _firstLlmCall = true;
-    _preScreenResponse = null;
     _config;
     _client;
     constructor(options, executeFunctions) {
@@ -51,8 +49,8 @@ class OpenBoxLangChainMiddleware {
         return (0, hook_handlers_1.handleBeforeAgent)(this, state, threadId);
     }
     /** after_agent() — session close. Returns the WorkflowCompleted verdict. */
-    async afterAgent(state) {
-        return (0, hook_handlers_1.handleAfterAgent)(this, state);
+    async afterAgent(state, failedWith) {
+        return (0, hook_handlers_1.handleAfterAgent)(this, state, failedWith);
     }
     /**
      * wrap_model_call() — LLM governance.

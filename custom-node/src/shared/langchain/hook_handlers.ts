@@ -19,6 +19,7 @@ import {
   registerActivity,
   runWithActivity,
   unregisterActivity,
+  unregisterWorkflow,
 } from './span_processor';
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import {
@@ -46,8 +47,6 @@ export async function handleBeforeAgent(
   const turn = hexId(32);
   mw._workflowId = `${threadId}-${turn.slice(0, 8)}`;
   mw._runId = `${threadId}-run-${turn.slice(8, 16)}`;
-  mw._firstLlmCall = true;
-  mw._preScreenResponse = null;
   mw._client.updateTraceId(mw._workflowId);
 
   const messages = state.messages ?? [];
@@ -93,6 +92,7 @@ export async function handleBeforeAgent(
 export async function handleAfterAgent(
   mw: OpenBoxLangChainMiddleware,
   state: AgentState,
+  failedWith?: Error,
 ): Promise<GovernanceVerdictResponse | null> {
   if (!mw._config.sendChainEndEvent) return null;
 
@@ -103,14 +103,20 @@ export async function handleAfterAgent(
     lastContent = lastMsg?.content ?? null;
   }
 
-  return evaluate(mw, {
+  const verdict = await evaluate(mw, {
     ...baseEventFields(mw),
     event_type: 'WorkflowCompleted',
     activity_id: `${mw._runId}-wf`,
     activity_type: mw._workflowType,
     workflow_output: safeSerialize({ result: lastContent }),
-    status: 'completed',
+    status: failedWith ? 'failed' : 'completed',
+    ...(failedWith ? { error: failedWith.message } : {}),
   } as LangChainGovernanceEvent);
+
+  // Clean up any lingering activity registrations for this workflow.
+  // Mirrors Python SDK's span_processor.unregister_workflow(workflow_id).
+  unregisterWorkflow(mw._workflowId);
+  return verdict;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -122,14 +128,16 @@ export async function handleWrapModelCall(
   messages: unknown[],
   handler: () => Promise<unknown>,
 ): Promise<unknown> {
-  const promptText = extractPromptFromMessages(messages);
+  // Use only the last human message as the governed prompt — extractPromptFromMessages
+  // would join ALL human messages including chat history loaded from memory, producing
+  // a concatenated blob of prior turns instead of the current user input.
+  const promptText = extractLastUserMessage(messages) ?? extractPromptFromMessages(messages);
   if (!promptText.trim()) return handler();
 
   const b = baseEventFields(mw);
   const activityId = hexId(32);
   let startResponse: GovernanceVerdictResponse | null;
   const startMs = Date.now();
-  mw._firstLlmCall = false;
 
   if (mw._config.sendLlmStartEvent) {
     startResponse = await evaluate(mw, {
@@ -144,12 +152,28 @@ export async function handleWrapModelCall(
     startResponse = null;
   }
 
-  // PII redaction — mutate messages before handing to the model
+  // PII redaction — only apply when the returned text is ≤ the prompt we sent.
+  // Redaction removes/replaces content; it never expands it. If Core returns a
+  // longer string it is echoing stale data from a prior session — applying it
+  // would overwrite the current user message with a concatenation of past turns.
   const guardrails = startResponse?.guardrails_result ?? startResponse?.guardrailsResult;
   if (guardrails) {
     const gr = guardrails;
     if (gr.input_type === 'activity_input' && gr.redacted_input != null) {
-      applyPiiRedaction(messages, gr.redacted_input);
+      const ri = gr.redacted_input;
+      const redactedStr: string | null =
+        typeof ri === 'string' ? ri
+        : Array.isArray(ri) && ri.length > 0
+          ? (typeof ri[0] === 'string'
+              ? ri[0]
+              : (typeof ri[0] === 'object' && ri[0] !== null
+                  ? ((ri[0] as Record<string, string>).prompt ?? null)
+                  : null))
+          : null;
+      // Allow 64 chars slack for replacements like "[SSN]" → "[REDACTED-SSN]"
+      if (redactedStr == null || redactedStr.length <= promptText.length + 64) {
+        applyPiiRedaction(messages, gr.redacted_input);
+      }
     }
   }
 
@@ -241,13 +265,20 @@ export async function handleWrapMemoryOp<T>(
   const startMs = Date.now();
   const b = baseEventFields(mw);
 
-  // Register the activity so db/file hooks inside the memory op can emit
-  // hook_trigger span payloads. The first hook_trigger (db_query started) acts
-  // as the ActivityStarted node on the Core dashboard — exactly how http hooks
-  // work for llm_call. We intentionally do NOT send an explicit evaluate()
-  // ActivityStarted here: doing so created a duplicate "started" node because
-  // Core also renders each hook_trigger payload (which carries event_type:
-  // 'ActivityStarted' from the registered context) as a timeline node.
+  // Send explicit ActivityStarted evaluate BEFORE registering the activity.
+  // This creates an anchor node in Core's timeline so subsequent DB hook_triggers
+  // (hook_trigger:true, stage:'started'|'completed') are grouped under it
+  // instead of each creating their own ActivityStarted node. Mirrors how
+  // LLMStarted anchors HTTP spans for llm_call activities.
+  try {
+    await evaluate(mw, {
+      ...b,
+      event_type: 'ActivityStarted',
+      activity_id: activityId,
+      activity_type: opType,
+    } as LangChainGovernanceEvent);
+  } catch { /* non-fatal */ }
+
   registerActivity(
     activityId,
     {

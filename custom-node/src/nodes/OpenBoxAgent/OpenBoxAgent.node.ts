@@ -26,6 +26,7 @@ import { testOpenBoxCredential } from '../../shared/credential-test';
 import {
   GovernanceBlockedError,
   GovernanceHaltError,
+  GuardrailsValidationError,
   OpenBoxLangChainMiddleware,
 } from '../../shared/langchain';
 
@@ -233,129 +234,146 @@ export class OpenBoxAgent implements INodeType {
       const execId = this.getExecutionId();
       const threadId = `${String(this.getWorkflow().id ?? 'wf')}-${execId}`;
 
-      // ══════════════════════════════════════════════════════════════════════
-      // before_agent — SignalReceived + WorkflowStarted + pre-screen
-      // Pre-screens on the raw user message only; chat history is added below.
-      // ══════════════════════════════════════════════════════════════════════
-      try {
-        await middleware.beforeAgent({ messages: [['human', userMessage]] }, threadId);
-      } catch (err) {
-        mapGovernanceError(err, this, i);
-        throw err;
-      }
-
-      // ── Load memory (after beforeAgent so middleware IDs are set) ──────────
-      // Wrapped in wrapMemoryOp so pg queries inside the memory node are
-      // captured as db_query spans under a memory_load activity.
-      let chatHistory: unknown[] = [];
-      if (memory) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const vars = await middleware.wrapMemoryOp<any>('memory_load', () =>
-            memory.loadMemoryVariables({ input: userMessage }),
-          );
-          chatHistory = (vars.chat_history ?? vars.history ?? []) as unknown[];
-        } catch { /* non-fatal */ }
-      }
-
-      const messages: unknown[] = [
-        ['system', systemMessage],
-        ...chatHistory,
-        ['human', userMessage],
-      ];
-
+      // messages declared here so afterAgent always has the latest state.
+      const messages: unknown[] = [];
       let finalOutput = '';
       let iterations = 0;
       let toolCallCount = 0;
+      // Capture any governance/runtime error from the agent loop so afterAgent
+      // (WorkflowCompleted) can always fire — matching Python SDK's behaviour
+      // of sending WorkflowCompleted with status "failed" before re-raising.
+      let loopError: unknown = null;
 
-      // ══════════════════════════════════════════════════════════════════════
-      // Agent loop — each iteration calls wrapModelCall / wrapToolCall
-      // ══════════════════════════════════════════════════════════════════════
-      const cancelSignal =
-        typeof this.getExecutionCancelSignal === 'function'
-          ? this.getExecutionCancelSignal()
-          : undefined;
+      try {
+        // ════════════════════════════════════════════════════════════════════
+        // before_agent — SignalReceived + WorkflowStarted + pre-screen
+        // ════════════════════════════════════════════════════════════════════
+        await middleware.beforeAgent({ messages: [['human', userMessage]] }, threadId);
 
-      agentLoop: for (let iter = 0; iter < maxIterations; iter++) {
-        iterations = iter + 1;
-
-        // ── wrapModelCall ──────────────────────────────────────────────────
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let response: any;
-        try {
-          response = await middleware.wrapModelCall(messages, () =>
-            boundModel.invoke(messages, { signal: cancelSignal }),
-          );
-        } catch (err) {
-          mapGovernanceError(err, this, i);
-          throw err;
-        }
-
-        const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> =
-          response?.tool_calls ?? [];
-
-        // No tool calls → final response
-        if (!toolCalls.length) {
-          finalOutput = extractTextContent(response?.content);
-          messages.push(response);
-          break agentLoop;
-        }
-
-        messages.push(response); // AIMessage with tool_calls
-
-        // ── wrapToolCall per tool ──────────────────────────────────────────
-        for (const toolCall of toolCalls) {
-          toolCallCount++;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const tool = tools.find((t: any) => t.name === toolCall.name);
-          if (!tool) {
-            throw new NodeOperationError(
-              this.getNode(),
-              `Tool "${toolCall.name}" is not connected.`,
-              { itemIndex: i },
-            );
-          }
-
-          let toolResult: string;
+        // ── Load memory (after beforeAgent so middleware IDs are set) ────────
+        let chatHistory: unknown[] = [];
+        if (memory) {
           try {
-            const raw = await middleware.wrapToolCall(toolCall.name, toolCall.args, () =>
-              tool.invoke(toolCall.args),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const vars = await middleware.wrapMemoryOp<any>('memory_load', () =>
+              memory.loadMemoryVariables({ input: userMessage }),
             );
-            // null/undefined (e.g. HTTP node with empty/null response body) → empty string
-            // so the LLM receives a ToolMessage with valid content instead of crashing.
-            if (raw == null) {
-              toolResult = '';
-            } else {
-              toolResult = typeof raw === 'string' ? raw : JSON.stringify(raw);
-            }
+            chatHistory = (vars.chat_history ?? vars.history ?? []) as unknown[];
+          } catch { /* non-fatal */ }
+        }
+
+        messages.push(['system', systemMessage], ...chatHistory, ['human', userMessage]);
+
+        // ════════════════════════════════════════════════════════════════════
+        // Agent loop — each iteration calls wrapModelCall / wrapToolCall
+        // ════════════════════════════════════════════════════════════════════
+        const cancelSignal =
+          typeof this.getExecutionCancelSignal === 'function'
+            ? this.getExecutionCancelSignal()
+            : undefined;
+
+        agentLoop: for (let iter = 0; iter < maxIterations; iter++) {
+          iterations = iter + 1;
+
+          // ── wrapModelCall ────────────────────────────────────────────────
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let response: any;
+          try {
+            response = await middleware.wrapModelCall(messages, () =>
+              boundModel.invoke(messages, { signal: cancelSignal }),
+            );
           } catch (err) {
-            // Governance errors (halt/block) end the execution immediately.
-            mapGovernanceError(err, this, i);
-            // Non-governance errors (HTTP 4xx/5xx, timeout, parse failure, etc.):
-            // feed the error back as the tool result so the LLM can respond
-            // gracefully. Throwing here causes n8n to leave the execution in a
-            // perpetual "running" state because the error bypasses the normal
-            // after_agent/WorkflowCompleted path.
-            toolResult = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            loopError = err;
+            break agentLoop;
           }
 
-          messages.push(makeToolMessage(toolResult, toolCall.id, toolCall.name));
-        }
-      }
+          const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> =
+            response?.tool_calls ?? [];
 
-      if (!finalOutput && iterations >= maxIterations) {
-        finalOutput = `[Agent reached max iterations (${maxIterations}) without a final response.]`;
+          // No tool calls → final response
+          if (!toolCalls.length) {
+            finalOutput = extractTextContent(response?.content);
+            messages.push(response);
+            break agentLoop;
+          }
+
+          messages.push(response); // AIMessage with tool_calls
+
+          // ── wrapToolCall per tool ────────────────────────────────────────
+          for (const toolCall of toolCalls) {
+            toolCallCount++;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tool = tools.find((t: any) => t.name === toolCall.name);
+            if (!tool) {
+              loopError = new NodeOperationError(
+                this.getNode(),
+                `Tool "${toolCall.name}" is not connected.`,
+                { itemIndex: i },
+              );
+              break;
+            }
+
+            let toolResult = '';
+            try {
+              const raw = await middleware.wrapToolCall(toolCall.name, toolCall.args, () =>
+                tool.invoke(toolCall.args),
+              );
+              // null/undefined (e.g. HTTP node with empty/null response body) → empty string
+              // so the LLM receives a ToolMessage with valid content instead of crashing.
+              if (raw != null) {
+                toolResult = typeof raw === 'string' ? raw : JSON.stringify(raw);
+              }
+            } catch (err) {
+              // Governance errors abort the loop so afterAgent fires with failed status.
+              if (
+                err instanceof GovernanceHaltError ||
+                err instanceof GovernanceBlockedError ||
+                err instanceof GuardrailsValidationError
+              ) {
+                loopError = err;
+                break;
+              }
+              // Non-governance errors (HTTP 4xx/5xx, timeout, parse failure, etc.):
+              // feed the error back as the tool result so the LLM can respond
+              // gracefully instead of leaving the execution in a running state.
+              toolResult = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            }
+
+            if (loopError != null) break;
+            messages.push(makeToolMessage(toolResult, toolCall.id, toolCall.name));
+          }
+
+          if (loopError != null) break agentLoop;
+        }
+
+        if (!finalOutput && iterations >= maxIterations) {
+          finalOutput = `[Agent reached max iterations (${maxIterations}) without a final response.]`;
+        }
+      } catch (err) {
+        loopError = err;
       }
 
       // ══════════════════════════════════════════════════════════════════════
-      // after_agent — WorkflowCompleted
+      // after_agent — WorkflowCompleted (always fires; failed status on error)
       // ══════════════════════════════════════════════════════════════════════
       let completedVerdict;
       try {
-        completedVerdict = await middleware.afterAgent({ messages });
+        completedVerdict = await middleware.afterAgent(
+          { messages },
+          loopError instanceof Error ? loopError : loopError != null ? new Error(String(loopError)) : undefined,
+        );
       } catch (err) {
-        mapGovernanceError(err, this, i);
-        throw err;
+        if (loopError == null) {
+          mapGovernanceError(err, this, i);
+          throw err;
+        }
+        // non-fatal when we already have a loopError
+      }
+
+      // Re-throw loop error AFTER afterAgent has fired
+      if (loopError != null) {
+        mapGovernanceError(loopError, this, i);
+        throw loopError as Error;
       }
 
       // Apply output redaction from WorkflowCompleted guardrails
@@ -411,6 +429,13 @@ function mapGovernanceError(
       ctx.getNode(),
       `OpenBox governance requires approval`,
       { itemIndex, description: err.message },
+    );
+  }
+  if (err instanceof GuardrailsValidationError) {
+    throw new NodeOperationError(
+      ctx.getNode(),
+      `OpenBox guardrails validation failed: ${err.message}`,
+      { itemIndex },
     );
   }
 }

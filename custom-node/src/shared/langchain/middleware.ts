@@ -26,8 +26,6 @@ export class OpenBoxLangChainMiddleware {
   _workflowId: string = '';
   _runId: string = '';
   _workflowType: string;
-  _firstLlmCall: boolean = true;
-  _preScreenResponse: GovernanceVerdictResponse | null = null;
 
   readonly _config: GovernanceConfig;
   readonly _client: GovernanceClient;
@@ -63,8 +61,8 @@ export class OpenBoxLangChainMiddleware {
   }
 
   /** after_agent() — session close. Returns the WorkflowCompleted verdict. */
-  async afterAgent(state: AgentState): Promise<GovernanceVerdictResponse | null> {
-    return handleAfterAgent(this, state);
+  async afterAgent(state: AgentState, failedWith?: Error): Promise<GovernanceVerdictResponse | null> {
+    return handleAfterAgent(this, state, failedWith);
   }
 
   /**

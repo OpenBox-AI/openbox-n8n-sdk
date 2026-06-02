@@ -4,6 +4,11 @@ exports.setupNodeHookInstrumentation = setupNodeHookInstrumentation;
 const span_processor_1 = require("./span_processor");
 const types_1 = require("./types");
 let installed = false;
+// Skip system/internal paths — mirrors Python SDK's file skip patterns.
+const FILE_SKIP_PATTERNS = ['/dev/', '/proc/', '/sys/', '/node_modules/'];
+function shouldSkipFilePath(path) {
+    return FILE_SKIP_PATTERNS.some((p) => path.includes(p));
+}
 function spanBase(name, kind, stage, startMs, error, endMs) {
     const completedEndMs = stage === 'completed' ? endMs ?? Date.now() : undefined;
     return {
@@ -74,6 +79,60 @@ function buildDbSpanData(activityId, opts) {
 async function evaluateDb(activityId, opts) {
     await (0, span_processor_1.evaluateActivitySpan)(activityId, buildDbSpanData(activityId, opts));
 }
+/**
+ * Wrap a fs.promises FileHandle to track open→read/write→close as a single
+ * lifecycle span. Mirrors Python SDK's TracedFile wrapper.
+ */
+function wrapFileHandle(handle, activityId, filePath, fileMode, openStartMs) {
+    let totalBytesRead = 0;
+    let totalBytesWritten = 0;
+    const ops = new Set(['open']);
+    const origRead = typeof handle.read === 'function'
+        ? handle.read
+        : null;
+    const origWrite = typeof handle.write === 'function'
+        ? handle.write
+        : null;
+    const origClose = handle.close;
+    if (origRead) {
+        handle.read = async function patchedHandleRead(...a) {
+            const r = await Reflect.apply(origRead, this, a);
+            if ((r?.bytesRead ?? 0) > 0)
+                totalBytesRead += r.bytesRead;
+            ops.add('read');
+            return r;
+        };
+    }
+    if (origWrite) {
+        handle.write = async function patchedHandleWrite(...a) {
+            const r = await Reflect.apply(origWrite, this, a);
+            if ((r?.bytesWritten ?? 0) > 0)
+                totalBytesWritten += r.bytesWritten;
+            ops.add('write');
+            return r;
+        };
+    }
+    handle.close = async function patchedHandleClose(...a) {
+        const endMs = Date.now();
+        try {
+            return await Reflect.apply(origClose, this, a);
+        }
+        finally {
+            void evaluateFile(activityId, {
+                filePath,
+                fileMode,
+                operation: 'open',
+                stage: 'completed',
+                startMs: openStartMs,
+                endMs,
+                bytesRead: totalBytesRead || undefined,
+                bytesWritten: totalBytesWritten || undefined,
+                operations: [...ops],
+            });
+        }
+    };
+    return handle;
+}
 function patchFsPromises(fs) {
     const promises = fs.promises;
     if (promises._openboxPatched)
@@ -88,6 +147,8 @@ function patchFsPromises(fs) {
             if (!activityId)
                 return Reflect.apply(original, this, arguments);
             const filePath = String(path);
+            if (shouldSkipFilePath(filePath))
+                return Reflect.apply(original, this, arguments);
             const startMs = Date.now();
             const writes = operation !== 'readFile';
             const fileMode = operation === 'readFile' ? 'r' : operation === 'appendFile' ? 'a' : 'w';
@@ -118,6 +179,32 @@ function patchFsPromises(fs) {
             }
         };
     }
+    // Patch open() for open→operations→close lifecycle.
+    // Mirrors Python SDK's TracedFile wrapper.
+    const originalOpen = promises.open;
+    if (typeof originalOpen === 'function') {
+        promises.open = async function patchedOpen(path, ...openArgs) {
+            const activityId = (0, span_processor_1.getCurrentActivityId)();
+            if (!activityId)
+                return Reflect.apply(originalOpen, this, [path, ...openArgs]);
+            const filePath = String(path);
+            if (shouldSkipFilePath(filePath))
+                return Reflect.apply(originalOpen, this, [path, ...openArgs]);
+            const flags = openArgs[0];
+            const fileMode = typeof flags === 'number' ? String(flags) : String(flags ?? 'r');
+            const startMs = Date.now();
+            await evaluateFile(activityId, { filePath, fileMode, operation: 'open', stage: 'started', startMs });
+            let handle;
+            try {
+                handle = await Reflect.apply(originalOpen, this, [path, ...openArgs]);
+            }
+            catch (err) {
+                await evaluateFile(activityId, { filePath, fileMode, operation: 'open', stage: 'completed', startMs, endMs: Date.now(), error: err });
+                throw err;
+            }
+            return wrapFileHandle(handle, activityId, filePath, fileMode, startMs);
+        };
+    }
 }
 function patchFsCallbacks(fs) {
     const target = fs;
@@ -133,6 +220,8 @@ function patchFsCallbacks(fs) {
             if (!activityId)
                 return Reflect.apply(original, this, [path, ...args]);
             const filePath = String(path);
+            if (shouldSkipFilePath(filePath))
+                return Reflect.apply(original, this, [path, ...args]);
             const startMs = Date.now();
             const writes = operation !== 'readFile';
             const fileMode = operation === 'readFile' ? 'r' : operation === 'appendFile' ? 'a' : 'w';
@@ -243,20 +332,14 @@ function patchPgExports(pg) {
                     host,
                     port: Number(port) || null,
                 };
-                // pg supports both callback-style and Promise-style query() calls.
-                // For callback-style we can't chain Promises, so fire-and-forget 'started'.
                 const hasCallback = args.length > 0 && typeof args[args.length - 1] === 'function';
                 if (hasCallback) {
                     void evaluateDb(activityId, { ...dbOpts, stage: 'started', startMs });
                     return original.call(self, query, ...args);
                 }
-                // Promise-style: strictly sequence started → query → completed.
-                // Mirrors Python SDK's _run_governed_query_sync / _run_governed_query_async:
-                // 'started' is awaited before the query runs so Core always receives events
-                // in the correct order regardless of network latency variance.
                 return evaluateDb(activityId, { ...dbOpts, stage: 'started', startMs })
                     .catch(() => { })
-                    .then(() => original.call(self, query, ...args))
+                    .then(() => original.call(self, query, ...args)
                     .then(async (value) => {
                     await evaluateDb(activityId, {
                         ...dbOpts, stage: 'completed', startMs, endMs: Date.now(), rowcount: value?.rowCount,
@@ -267,7 +350,7 @@ function patchPgExports(pg) {
                         ...dbOpts, stage: 'completed', startMs, endMs: Date.now(), error: err,
                     }).catch(() => { });
                     throw err;
-                });
+                }));
             };
         }
         return prototypes.length > 0;
@@ -301,15 +384,30 @@ function patchMysql2Exports(mysql2) {
                 return original.call(self, sql, ...args);
             const statement = typeof sql === 'string' ? sql : String(sql?.sql ?? sql ?? '');
             const startMs = Date.now();
-            void evaluateDb(activityId, {
+            const dbOpts = {
                 dbSystem: 'mysql',
                 dbName: self.config?.database,
                 statement,
                 host: self.config?.host,
                 port: Number(self.config?.port) || null,
-                stage: 'started',
-                startMs,
-            });
+            };
+            void evaluateDb(activityId, { ...dbOpts, stage: 'started', startMs });
+            const callbackIndex = args.findIndex((a) => typeof a === 'function');
+            if (callbackIndex >= 0) {
+                const originalCb = args[callbackIndex];
+                args[callbackIndex] = function patchedMysql2Callback(err, results, fields) {
+                    void evaluateDb(activityId, {
+                        ...dbOpts,
+                        stage: 'completed',
+                        startMs,
+                        endMs: Date.now(),
+                        error: err || undefined,
+                        rowcount: Array.isArray(results) ? results.length
+                            : results?.affectedRows ?? null,
+                    });
+                    originalCb(err, results, fields);
+                };
+            }
             return original.call(self, sql, ...args);
         };
         return true;
@@ -377,15 +475,7 @@ function patchMongoExports(mongodb) {
             const statement = JSON.stringify({ [method]: filter ?? {} }).slice(0, 2000);
             const startMs = Date.now();
             const dbName = self.dbName ?? self.s?.dbName ?? String(self.namespace ?? self.s?.namespace ?? '').split('.')[0];
-            void evaluateDb(activityId, {
-                dbSystem: 'mongodb',
-                dbName,
-                statement,
-                host: 'unknown',
-                port: null,
-                stage: 'started',
-                startMs,
-            });
+            void evaluateDb(activityId, { dbSystem: 'mongodb', dbName, statement, host: 'unknown', port: null, stage: 'started', startMs });
             const result = original.call(self, filter, ...args);
             if (result && typeof result === 'object' && typeof result.then === 'function') {
                 return result.then(async (value) => {
@@ -470,15 +560,7 @@ function patchRedisClient(client) {
             : String(command?.name ?? command ?? 'UNKNOWN');
         const statement = Array.isArray(command) ? command.map(String).join(' ') : name;
         const startMs = Date.now();
-        void evaluateDb(activityId, {
-            dbSystem: 'redis',
-            dbName: '0',
-            statement,
-            host: 'unknown',
-            port: 6379,
-            stage: 'started',
-            startMs,
-        });
+        void evaluateDb(activityId, { dbSystem: 'redis', dbName: '0', statement, host: 'unknown', port: 6379, stage: 'started', startMs });
         const result = original.call(this, command, ...args);
         if (result && typeof result === 'object' && typeof result.then === 'function') {
             return result.then(async (value) => {
