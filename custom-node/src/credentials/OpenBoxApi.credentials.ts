@@ -1,6 +1,7 @@
 import {
   IAuthenticateGeneric,
   ICredentialDataDecryptedObject,
+  ICredentialTestRequest,
   ICredentialType,
   INodeProperties,
 } from 'n8n-workflow';
@@ -139,6 +140,14 @@ export class OpenBoxApi implements ICredentialType {
         'Optional. Shared secret used by the OpenBox Trigger node to verify HMAC-SHA256 signatures on inbound webhooks (X-OpenBox-Signature header).',
     },
   ];
+
+  test: ICredentialTestRequest = {
+    request: {
+      baseURL: '={{$credentials.openboxUrl}}',
+      url: '/api/v1/auth/validate',
+      method: 'GET',
+    },
+  };
 
   authenticate: IAuthenticateGeneric = {
     type: 'generic',

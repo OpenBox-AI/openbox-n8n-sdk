@@ -79,6 +79,7 @@ class OpenBoxAgent {
         outputs: [n8n_workflow_1.NodeConnectionTypes.Main],
         credentials: [
             { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
+            { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
         ],
         properties: [
             {
@@ -133,6 +134,7 @@ class OpenBoxAgent {
     methods = {
         credentialTest: {
             openBoxApiCredentialTest: credential_test_1.testOpenBoxCredential,
+            postgresConnectionTest: credential_test_1.testPostgresCredential,
         },
     };
     async execute() {

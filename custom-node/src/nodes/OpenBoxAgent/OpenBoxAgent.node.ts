@@ -22,7 +22,7 @@ import {
   NodeOperationError,
 } from 'n8n-workflow';
 
-import { testOpenBoxCredential } from '../../shared/credential-test';
+import { testOpenBoxCredential, testPostgresCredential } from '../../shared/credential-test';
 import {
   GovernanceBlockedError,
   GovernanceHaltError,
@@ -97,6 +97,7 @@ export class OpenBoxAgent implements INodeType {
     outputs: [NodeConnectionTypes.Main] as unknown as INodeTypeDescription['outputs'],
     credentials: [
       { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
+      { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
     ],
     properties: [
       {
@@ -154,6 +155,7 @@ export class OpenBoxAgent implements INodeType {
   methods = {
     credentialTest: {
       openBoxApiCredentialTest: testOpenBoxCredential,
+      postgresConnectionTest: testPostgresCredential,
     },
   };
 

@@ -125,6 +125,13 @@ class OpenBoxApi {
             description: 'Optional. Shared secret used by the OpenBox Trigger node to verify HMAC-SHA256 signatures on inbound webhooks (X-OpenBox-Signature header).',
         },
     ];
+    test = {
+        request: {
+            baseURL: '={{$credentials.openboxUrl}}',
+            url: '/api/v1/auth/validate',
+            method: 'GET',
+        },
+    };
     authenticate = {
         type: 'generic',
         properties: {
