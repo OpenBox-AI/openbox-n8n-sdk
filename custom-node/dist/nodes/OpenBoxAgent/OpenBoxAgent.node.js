@@ -34,6 +34,57 @@ function makeToolMessage(content, tool_call_id, name) {
         return new LangchainToolMessage({ content, tool_call_id, name });
     return { role: 'tool', content, tool_call_id, name };
 }
+/**
+ * Detect error strings that n8n's ToolHttpRequest returns instead of throwing.
+ *
+ * Path 1 — httpRequest() throws (connection refused, DNS, etc.):
+ *   "HTTP 503 There was an error: \"<message>\""
+ *   "There was an error: \"<message>\""
+ *
+ * Path 2 — returnFullResponse=true, server returns 4xx/5xx body directly:
+ *   raw HTML page whose <title> contains the HTTP error code
+ *   raw JSON with a top-level "error" key or statusCode >= 400
+ */
+function isToolErrorResult(result) {
+    if (!result)
+        return false;
+    // n8n explicit error prefix (path 1)
+    if (/^(HTTP \d{3} )?There was an error:/i.test(result.trimStart()))
+        return true;
+    // HTML error page with HTTP status code in <title> (path 2)
+    if (/^\s*<(!DOCTYPE\s+html|html)/i.test(result)) {
+        return /<title>[^<]*(4\d{2}|5\d{2})[^<]*<\/title>/i.test(result);
+    }
+    // JSON error body: { "error": ..., "statusCode": 4xx/5xx }
+    try {
+        const parsed = JSON.parse(result);
+        if (typeof parsed === 'object' && parsed !== null) {
+            const code = Number(parsed.statusCode ?? parsed.status ?? parsed.code ?? 0);
+            if (code >= 400)
+                return true;
+            if (parsed.error && parsed.error !== false)
+                return true;
+        }
+    }
+    catch { /* not JSON */ }
+    return false;
+}
+function extractToolErrorMessage(result) {
+    // For HTML pages, pull the <title> text as a human-readable summary
+    const titleMatch = /<title>([^<]+)<\/title>/i.exec(result);
+    if (titleMatch)
+        return titleMatch[1].trim();
+    // For JSON bodies, pull the error/message field
+    try {
+        const parsed = JSON.parse(result);
+        const msg = parsed.message ?? parsed.error ?? parsed.detail;
+        if (msg && typeof msg === 'string')
+            return msg;
+    }
+    catch { /* not JSON */ }
+    // Trim the raw string to a reasonable length
+    return result.length > 200 ? result.slice(0, 200) + '…' : result;
+}
 function extractTextContent(content) {
     if (typeof content === 'string')
         return content;
@@ -215,7 +266,7 @@ class OpenBoxAgent {
                 if (memory) {
                     try {
                         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        const vars = await middleware.wrapMemoryOp('memory_load', () => memory.loadMemoryVariables({ input: userMessage }));
+                        const vars = await middleware.wrapMemoryOp('loadMemoryVariables', () => memory.loadMemoryVariables({ input: userMessage }));
                         chatHistory = (vars.chat_history ?? vars.history ?? []);
                     }
                     catch { /* non-fatal */ }
@@ -273,10 +324,21 @@ class OpenBoxAgent {
                                 loopError = err;
                                 break;
                             }
-                            // Non-governance errors (HTTP 4xx/5xx, timeout, parse failure, etc.):
-                            // feed the error back as the tool result so the LLM can respond
-                            // gracefully instead of leaving the execution in a running state.
-                            toolResult = `Error: ${err instanceof Error ? err.message : String(err)}`;
+                            // Non-governance tool errors (HTTP 4xx/5xx, timeout, parse failure, etc.):
+                            // stop the agent immediately and surface the error as the final output
+                            // so n8n completes the execution rather than running more LLM iterations.
+                            finalOutput = `Tool "${toolCall.name}" failed: ${err instanceof Error ? err.message : String(err)}`;
+                            break agentLoop;
+                        }
+                        // n8n's ToolHttpRequest does not throw for HTTP error responses — it
+                        // returns the error body as a string via two paths:
+                        //   1. httpRequest() throws  → "HTTP 503 There was an error: \"<msg>\""
+                        //   2. returnFullResponse=true catches 5xx → raw HTML/JSON body
+                        // Detect both and stop the agent immediately instead of feeding the
+                        // error body back to the LLM and looping.
+                        if (isToolErrorResult(toolResult)) {
+                            finalOutput = `Tool "${toolCall.name}" failed: ${extractToolErrorMessage(toolResult)}`;
+                            break agentLoop;
                         }
                         if (loopError != null)
                             break;
@@ -287,6 +349,16 @@ class OpenBoxAgent {
                 }
                 if (!finalOutput && iterations >= maxIterations) {
                     finalOutput = `[Agent reached max iterations (${maxIterations}) without a final response.]`;
+                }
+                // ── Save to memory (before afterAgent so memory_save events land inside
+                // the open workflow on Core's execution tree, not after WorkflowCompleted
+                // has already closed it). Only save on success — loopError is still null here
+                // because any break-with-error also sets loopError before reaching this point.
+                if (memory && loopError == null) {
+                    try {
+                        await middleware.wrapMemoryOp('saveContext', () => memory.saveContext({ input: userMessage }, { output: finalOutput }));
+                    }
+                    catch { /* non-fatal */ }
                 }
             }
             catch (err) {
@@ -311,18 +383,12 @@ class OpenBoxAgent {
                 mapGovernanceError(loopError, this, i);
                 throw loopError;
             }
-            // Apply output redaction from WorkflowCompleted guardrails
+            // Apply output redaction from WorkflowCompleted guardrails to the node's
+            // OUTPUT only — memory already stores the true agent response above.
             const gr = completedVerdict?.guardrails_result ??
                 completedVerdict?.guardrailsResult;
             if (gr?.redacted_input && gr.input_type === 'activity_output') {
                 finalOutput = String(gr.redacted_input);
-            }
-            // ── Save to memory ─────────────────────────────────────────────────────
-            if (memory) {
-                try {
-                    await middleware.wrapMemoryOp('memory_save', () => memory.saveContext({ input: userMessage }, { output: finalOutput }));
-                }
-                catch { /* non-fatal */ }
             }
             output.push({
                 json: {

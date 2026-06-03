@@ -258,7 +258,7 @@ export async function handleWrapModelCall(
 
 export async function handleWrapMemoryOp<T>(
   mw: OpenBoxLangChainMiddleware,
-  opType: 'memory_load' | 'memory_save',
+  opType: 'loadMemoryVariables' | 'saveContext',
   fn: () => Promise<T>,
 ): Promise<T> {
   const activityId = hexId(32);

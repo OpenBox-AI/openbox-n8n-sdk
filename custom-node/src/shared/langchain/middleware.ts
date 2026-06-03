@@ -95,7 +95,7 @@ export class OpenBoxLangChainMiddleware {
    * so database queries inside the memory node (e.g. pg Chat Memory) generate
    * db_query spans visible on the OpenBox dashboard.
    */
-  async wrapMemoryOp<T>(opType: 'memory_load' | 'memory_save', fn: () => Promise<T>): Promise<T> {
+  async wrapMemoryOp<T>(opType: 'loadMemoryVariables' | 'saveContext', fn: () => Promise<T>): Promise<T> {
     return handleWrapMemoryOp(this, opType, fn);
   }
 }
