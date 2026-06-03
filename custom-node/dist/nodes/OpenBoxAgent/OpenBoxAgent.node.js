@@ -80,6 +80,9 @@ class OpenBoxAgent {
         credentials: [
             { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
             { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
+            { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
+            { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
+            { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
         ],
         properties: [
             {
@@ -135,6 +138,9 @@ class OpenBoxAgent {
         credentialTest: {
             openBoxApiCredentialTest: credential_test_1.testOpenBoxCredential,
             postgresConnectionTest: credential_test_1.testPostgresCredential,
+            mysqlConnectionTest: credential_test_1.testMysqlCredential,
+            mongoDbConnectionTest: credential_test_1.testMongoDbCredential,
+            redisConnectionTest: credential_test_1.testRedisCredential,
         },
     };
     async execute() {

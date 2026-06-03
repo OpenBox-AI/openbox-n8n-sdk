@@ -22,7 +22,13 @@ import {
   NodeOperationError,
 } from 'n8n-workflow';
 
-import { testOpenBoxCredential, testPostgresCredential } from '../../shared/credential-test';
+import {
+  testOpenBoxCredential,
+  testMysqlCredential,
+  testMongoDbCredential,
+  testPostgresCredential,
+  testRedisCredential,
+} from '../../shared/credential-test';
 import {
   GovernanceBlockedError,
   GovernanceHaltError,
@@ -98,6 +104,9 @@ export class OpenBoxAgent implements INodeType {
     credentials: [
       { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
       { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
+      { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
+      { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
+      { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
     ],
     properties: [
       {
@@ -156,6 +165,9 @@ export class OpenBoxAgent implements INodeType {
     credentialTest: {
       openBoxApiCredentialTest: testOpenBoxCredential,
       postgresConnectionTest: testPostgresCredential,
+      mysqlConnectionTest: testMysqlCredential,
+      mongoDbConnectionTest: testMongoDbCredential,
+      redisConnectionTest: testRedisCredential,
     },
   };
 
