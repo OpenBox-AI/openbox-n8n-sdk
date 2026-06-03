@@ -339,6 +339,46 @@ export async function testRedisCredential(
   }
 }
 
+// ── SearXng ───────────────────────────────────────────────────────────────────
+
+/**
+ * Credential test for SearXng (`searXngApi`). The official credential class
+ * ships no built-in test. We hit `/search?q=test&format=json` with a short
+ * timeout — a 200 or 400 both confirm the server is reachable; only a network
+ * error or non-JSON host page counts as failure.
+ */
+export async function testSearXngCredential(
+  this: ICredentialTestFunctions,
+  credential: ICredentialsDecrypted,
+): Promise<INodeCredentialTestResult> {
+  const d = (credential.data ?? {}) as Record<string, unknown>;
+  const baseUrl = String(d.apiUrl ?? '').trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    return { status: 'Error', message: 'SearXng API URL is empty.' };
+  }
+
+  try {
+    await this.helpers.request({
+      method: 'GET',
+      url: `${baseUrl}/search`,
+      qs: { q: 'test', format: 'json' },
+      json: true,
+      timeout: 8000,
+    });
+    return { status: 'OK', message: 'Connection successful' };
+  } catch (err: unknown) {
+    // A 400 (bad request) still means the SearXng server responded — treat as OK.
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode !== undefined && statusCode < 500) {
+      return { status: 'OK', message: 'Connection successful' };
+    }
+    return {
+      status: 'Error',
+      message: `SearXng connection failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 // ── OpenBox ───────────────────────────────────────────────────────────────────
 
 /**

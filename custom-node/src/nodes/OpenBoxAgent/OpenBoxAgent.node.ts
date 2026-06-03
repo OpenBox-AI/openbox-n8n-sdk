@@ -28,6 +28,7 @@ import {
   testMongoDbCredential,
   testPostgresCredential,
   testRedisCredential,
+  testSearXngCredential,
 } from '../../shared/credential-test';
 import {
   GovernanceBlockedError,
@@ -107,6 +108,7 @@ export class OpenBoxAgent implements INodeType {
       { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
       { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
       { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
+      { name: 'searXngApi', required: false, testedBy: 'searXngConnectionTest' },
     ],
     properties: [
       {
@@ -168,6 +170,7 @@ export class OpenBoxAgent implements INodeType {
       mysqlConnectionTest: testMysqlCredential,
       mongoDbConnectionTest: testMongoDbCredential,
       redisConnectionTest: testRedisCredential,
+      searXngConnectionTest: testSearXngCredential,
     },
   };
 

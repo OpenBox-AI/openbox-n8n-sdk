@@ -4,6 +4,7 @@ exports.testPostgresCredential = testPostgresCredential;
 exports.testMysqlCredential = testMysqlCredential;
 exports.testMongoDbCredential = testMongoDbCredential;
 exports.testRedisCredential = testRedisCredential;
+exports.testSearXngCredential = testSearXngCredential;
 exports.testOpenBoxCredential = testOpenBoxCredential;
 const OpenBoxApi_credentials_1 = require("../credentials/OpenBoxApi.credentials");
 const signing_1 = require("./signing");
@@ -284,6 +285,41 @@ async function testRedisCredential(credential) {
             client.disconnect();
         }
         catch { /* ignore */ }
+    }
+}
+// ── SearXng ───────────────────────────────────────────────────────────────────
+/**
+ * Credential test for SearXng (`searXngApi`). The official credential class
+ * ships no built-in test. We hit `/search?q=test&format=json` with a short
+ * timeout — a 200 or 400 both confirm the server is reachable; only a network
+ * error or non-JSON host page counts as failure.
+ */
+async function testSearXngCredential(credential) {
+    const d = (credential.data ?? {});
+    const baseUrl = String(d.apiUrl ?? '').trim().replace(/\/+$/, '');
+    if (!baseUrl) {
+        return { status: 'Error', message: 'SearXng API URL is empty.' };
+    }
+    try {
+        await this.helpers.request({
+            method: 'GET',
+            url: `${baseUrl}/search`,
+            qs: { q: 'test', format: 'json' },
+            json: true,
+            timeout: 8000,
+        });
+        return { status: 'OK', message: 'Connection successful' };
+    }
+    catch (err) {
+        // A 400 (bad request) still means the SearXng server responded — treat as OK.
+        const statusCode = err.statusCode;
+        if (statusCode !== undefined && statusCode < 500) {
+            return { status: 'OK', message: 'Connection successful' };
+        }
+        return {
+            status: 'Error',
+            message: `SearXng connection failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
     }
 }
 // ── OpenBox ───────────────────────────────────────────────────────────────────

@@ -83,6 +83,7 @@ class OpenBoxAgent {
             { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
             { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
             { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
+            { name: 'searXngApi', required: false, testedBy: 'searXngConnectionTest' },
         ],
         properties: [
             {
@@ -141,6 +142,7 @@ class OpenBoxAgent {
             mysqlConnectionTest: credential_test_1.testMysqlCredential,
             mongoDbConnectionTest: credential_test_1.testMongoDbCredential,
             redisConnectionTest: credential_test_1.testRedisCredential,
+            searXngConnectionTest: credential_test_1.testSearXngCredential,
         },
     };
     async execute() {
