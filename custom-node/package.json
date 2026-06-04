@@ -4,25 +4,22 @@
   "private": true,
   "description": "OpenBox governance node for n8n (example)",
   "license": "MIT",
-  "main": "dist/OpenboxLlm.node.js",
+  "main": "dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js",
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
-    "smoke:load": "node -e \"['./dist/OpenboxLlm.node.js','./dist/nodes/OpenBox/OpenBox.node.js','./dist/nodes/OpenBoxTrigger/OpenBoxTrigger.node.js','./dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js','./dist/credentials/OpenBoxApi.credentials.js'].forEach(p => { require(p); }); console.log('node-load-ok')\"",
+    "smoke:load": "node -e \"require('./dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js'); console.log('node-load-ok')\"",
     "test": "vitest run",
     "test:watch": "vitest watch"
-  },
-  "dependencies": {
-    "openbox-sdk": "file:../../.."
   },
   "peerDependencies": {
     "n8n-workflow": ">=1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
-    "n8n-workflow": "^1.120.13",
+    "n8n-workflow": "1.120.13",
     "typescript": "^5.9.3",
     "vitest": "^4.1.2"
   },
@@ -32,9 +29,6 @@
       "dist/credentials/OpenBoxApi.credentials.js"
     ],
     "nodes": [
-      "dist/OpenboxLlm.node.js",
-      "dist/nodes/OpenBox/OpenBox.node.js",
-      "dist/nodes/OpenBoxTrigger/OpenBoxTrigger.node.js",
       "dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js"
     ]
   }

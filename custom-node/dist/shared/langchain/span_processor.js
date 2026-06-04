@@ -69,14 +69,21 @@ function buildHttpSpanData(opts) {
     const endNs = opts.endMs != null ? opts.endMs * 1_000_000 : null;
     const durationNs = endNs != null ? endNs - startNs : null;
     const error = opts.statusCode != null && opts.statusCode >= 400 ? `HTTP ${opts.statusCode}` : null;
+    // Name: include status code on completed spans so the dashboard shows
+    // e.g. "POST https://api.openai.com/v1/chat/completions 200"
+    const name = opts.stage === 'completed' && opts.statusCode != null
+        ? `${opts.method} ${opts.url} ${opts.statusCode}`
+        : `${opts.method} ${opts.url}`;
+    // start_time: for "completed" spans use end timestamp (mirrors Python SDK §5.6)
+    const spanStartNs = opts.stage === 'completed' ? (endNs ?? startNs) : startNs;
     return {
         span_id: (0, types_1.hexId)(16),
         trace_id: (0, types_1.hexId)(32),
         parent_span_id: null,
-        name: `${opts.method} ${opts.url}`,
+        name,
         kind: 'CLIENT',
         stage: opts.stage,
-        start_time: startNs,
+        start_time: spanStartNs,
         end_time: endNs,
         duration_ns: durationNs,
         attributes: {

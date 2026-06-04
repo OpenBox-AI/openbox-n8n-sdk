@@ -21,9 +21,7 @@ async function getOpenBoxCredentials(ctx) {
     catch {
         // Credential not attached — fall through to env-var path
     }
-    // Env-var fallback: mirrors the Temporal SDK's OPENBOX_API_KEY / OPENBOX_API_URL
     const envKey = process.env.OPENBOX_API_KEY ?? '';
-    const envUrl = (process.env.OPENBOX_API_URL ?? 'https://core.openbox.ai').replace(/\/+$/, '');
     if (!envKey) {
         throw new n8n_workflow_1.NodeApiError(ctx.getNode(), {
             message: 'OpenBox API key not set',
@@ -31,12 +29,11 @@ async function getOpenBoxCredentials(ctx) {
         });
     }
     return {
-        openboxUrl: envUrl,
+        openboxUrl: 'https://core.openbox.ai',
         apiKey: envKey,
-        environment: 'production',
         timeoutMs: 35_000,
-        failPolicy: 'fail_open',
-        enforceHttps: false,
+        failPolicy: 'fail_closed',
+        enforceHttps: true,
         agentDid: process.env.OPENBOX_AGENT_DID || undefined,
         agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY || undefined,
     };
@@ -59,12 +56,6 @@ async function openboxRequest(ctx, options) {
     // Serialize body before signing so the bytes we hash == the bytes we send.
     const bodyBytes = (0, signing_1.serializeBody)(options.body ?? null);
     const headers = (0, signing_1.buildSignedHeaders)(options.method, options.path, bodyBytes, credentials.apiKey, credentials.agentDid, credentials.agentPrivateKey);
-    if (credentials.organizationId) {
-        headers['X-OpenBox-Organization'] = credentials.organizationId;
-    }
-    if (credentials.projectId) {
-        headers['X-OpenBox-Project'] = credentials.projectId;
-    }
     if (options.traceId) {
         headers['X-OpenBox-Trace-Id'] = options.traceId;
     }
