@@ -15,12 +15,16 @@ import {
 } from './hooks';
 import { pollApprovalOrHalt } from './hitl';
 import {
+  addIgnoredPrefix,
   clearActivityAbort,
+  isActivityApproved,
+  markActivityApproved,
   registerActivity,
   runWithActivity,
   unregisterActivity,
   unregisterWorkflow,
 } from './span_processor';
+import { getOpenBoxCredentials } from '../openbox-client';
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import {
   GovernanceVerdictResponse,
@@ -48,6 +52,16 @@ export async function handleBeforeAgent(
   mw._workflowId = `${threadId}-${turn.slice(0, 8)}`;
   mw._runId = `${threadId}-run-${turn.slice(8, 16)}`;
   mw._client.updateTraceId(mw._workflowId);
+
+  // The constructor adds OPENBOX_API_URL to _ignoredPrefixes, but the actual
+  // URL for requests comes from the n8n credential (openboxUrl), which may
+  // differ. Ensure it is ignored so HTTP calls to Core made while a tool
+  // activity is registered don't get intercepted as hook spans and sent back
+  // to Core a second time, creating duplicate approval requests.
+  try {
+    const creds = await getOpenBoxCredentials(mw._client.executeFunctions);
+    addIgnoredPrefix(creds.openboxUrl);
+  } catch { /* non-fatal — constructor already added the env-var URL */ }
 
   const messages = state.messages ?? [];
   const userPrompt = extractLastUserMessage(messages);
@@ -181,7 +195,8 @@ export async function handleWrapModelCall(
   if (startResponse != null) {
     const result = enforceVerdict(startResponse, 'llm_start');
     if (result.requiresHitl) {
-      await pollApprovalOrHalt(mw, activityId, 'llm_call');
+      await pollApprovalOrHalt(mw, activityId, 'llm_call', result.approvalId);
+      markActivityApproved(activityId);
     }
   }
 
@@ -204,6 +219,7 @@ export async function handleWrapModelCall(
 
   // Call the model — https.request patch fires automatically
   let modelResponse: unknown;
+  let llmWasApproved = false;
   try {
     while (true) {
       try {
@@ -213,20 +229,24 @@ export async function handleWrapModelCall(
         const hookErr = extractGovernanceBlocked(err);
         if (hookErr?.verdict === 'require_approval') {
           await pollApprovalOrHalt(mw, activityId, 'llm_call');
+          markActivityApproved(activityId);
           clearActivityAbort(activityId);
           continue;
         }
         throw err;
       }
     }
+    // Capture BEFORE finally runs — unregisterActivity clears _approvedActivities.
+    llmWasApproved = isActivityApproved(activityId);
   } finally {
     unregisterActivity(activityId);
   }
   const endMs = Date.now();
   const duration_ms = endMs - startMs;
 
-  // LLMCompleted
-  if (mw._config.sendLlmEndEvent) {
+  // LLMCompleted — skip evaluate entirely when already approved to avoid
+  // spurious approval requests on Core for the same activity_type.
+  if (mw._config.sendLlmEndEvent && !llmWasApproved) {
     const meta = extractResponseMetadata(modelResponse);
     const resp = await evaluate(mw, {
       ...baseEventFields(mw),
@@ -244,7 +264,10 @@ export async function handleWrapModelCall(
     } as LangChainGovernanceEvent);
 
     if (resp != null) {
-      enforceVerdict(resp, 'llm_end');
+      const endResult = enforceVerdict(resp, 'llm_end');
+      if (endResult.requiresHitl) {
+        await pollApprovalOrHalt(mw, `${activityId}-c`, 'llm_call', endResult.approvalId);
+      }
     }
   }
 

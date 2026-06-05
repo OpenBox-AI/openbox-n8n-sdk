@@ -77,23 +77,29 @@ class GovernanceClient {
      * poll_approval() — POST HITL poll payload to Core.
      * Mirrors openbox_langgraph.client.GovernanceClient.poll_approval().
      */
-    async pollApproval(workflowId, runId, activityId) {
+    async pollApproval(workflowId, runId, activityId, approvalId) {
+        // If Core returned an approval_id in the evaluate response, use it as the
+        // poll key (mirrors Python SDK's exc.action_id pattern). Otherwise fall
+        // back to the triple (workflow_id, run_id, activity_id).
+        const pollKey = approvalId ?? activityId;
+        const reqBody = approvalId
+            ? { workflow_id: pollKey, run_id: pollKey, activity_id: pollKey }
+            : { workflow_id: workflowId, run_id: runId, activity_id: activityId };
+        console.log('[OpenBox HITL] polling approval:', JSON.stringify(reqBody), approvalId ? `(using Core approvalId)` : `(using activityId)`);
         try {
             const data = await (0, openbox_client_1.openboxRequest)(this.executeFunctions, {
                 method: 'POST',
                 path: '/api/v1/governance/approval',
-                body: {
-                    workflow_id: workflowId,
-                    run_id: runId,
-                    activity_id: activityId,
-                },
+                body: reqBody,
                 noRetry: true,
                 traceId: this.traceId,
             });
+            console.log('[OpenBox HITL] raw poll response:', JSON.stringify(data));
             const expiration = data.approval_expiration_time ?? data.approvalExpirationTime;
             if (typeof expiration === 'string' && expiration.trim()) {
                 const expiresAt = Date.parse(expiration);
                 if (!Number.isNaN(expiresAt) && expiresAt < Date.now()) {
+                    console.log('[OpenBox HITL] approval expired at', expiration);
                     return { ...data, expired: true };
                 }
             }

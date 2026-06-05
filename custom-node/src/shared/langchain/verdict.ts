@@ -36,6 +36,8 @@ export class GuardrailsValidationError extends Error {
 export interface VerdictResult {
   /** True when arm === 'require_approval' and the caller should poll. */
   requiresHitl: boolean;
+  /** Core-assigned approval ID — use this for polling, not the local activityId. */
+  approvalId?: string;
 }
 
 /**
@@ -74,7 +76,8 @@ export function enforceVerdict(
   }
 
   if (arm === 'require_approval') {
-    return { requiresHitl: true };
+    const approvalId = response.approval_id ?? response.approvalId ?? response.id;
+    return { requiresHitl: true, approvalId };
   }
 
   return { requiresHitl: false };

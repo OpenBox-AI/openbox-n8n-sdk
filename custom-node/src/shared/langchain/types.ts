@@ -22,6 +22,7 @@ export interface GovernanceVerdictResponse {
   reason?: string;
   risk_score?: number;
   riskScore?: number;
+  id?: string;
   approval_id?: string;
   approvalId?: string;
   guardrails_result?: GuardrailsResult;
@@ -89,7 +90,8 @@ export function safeSerialize(value: unknown): unknown {
   }
 }
 
-/** uuid4-equivalent using crypto-quality hex. Mirrors uuid.uuid4().hex in Python. */
+/** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 export function hexId(len: number = 32): string {
-  return Array.from({ length: len }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+  const { randomBytes } = require('crypto') as typeof import('crypto');
+  return randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 }

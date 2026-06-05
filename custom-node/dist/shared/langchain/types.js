@@ -27,7 +27,8 @@ function safeSerialize(value) {
         return String(value);
     }
 }
-/** uuid4-equivalent using crypto-quality hex. Mirrors uuid.uuid4().hex in Python. */
+/** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 function hexId(len = 32) {
-    return Array.from({ length: len }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    const { randomBytes } = require('crypto');
+    return randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 }

@@ -7,6 +7,9 @@
 import { baseEventFields, evaluate, extractGovernanceBlocked } from './hooks';
 import {
   clearActivityAbort,
+  hasActivityAbort,
+  isActivityApproved,
+  markActivityApproved,
   registerActivity,
   runWithActivity,
   unregisterActivity,
@@ -32,19 +35,12 @@ export async function handleWrapToolCall(
   const startMs = Date.now();
   const b = baseEventFields(mw);
 
-  registerActivity(
-    activityId,
-    {
-      ...b,
-      event_type: 'ActivityStarted',
-      activity_id: activityId,
-      activity_type: toolName,
-    },
-    mw._client.executeFunctions,
-    mw._workflowId,
-  );
-
   // ── ToolStarted ──────────────────────────────────────────────────────────────
+  // registerActivity is called AFTER this evaluate (mirrors handleWrapModelCall).
+  // Registering before the evaluate would put the activity in _activeActivities
+  // while the HTTP request for the evaluate call fires — patchedFetch would then
+  // capture that request as a hook span for the tool activity, sending a second
+  // governance event to Core and creating a duplicate approval request.
   if (mw._config.sendToolStartEvent) {
     const response = await evaluate(mw, {
       ...b,
@@ -59,30 +55,56 @@ export async function handleWrapToolCall(
     if (response != null) {
       const result = enforceVerdict(response, 'tool_start');
       if (result.requiresHitl) {
-        await pollApprovalOrHalt(mw, activityId, toolName);
+        await pollApprovalOrHalt(mw, activityId, toolName, result.approvalId);
+        markActivityApproved(activityId);
         clearActivityAbort(activityId);
       }
     }
   }
 
+  registerActivity(
+    activityId,
+    {
+      ...b,
+      event_type: 'ActivityStarted',
+      activity_id: activityId,
+      activity_type: toolName,
+    },
+    mw._client.executeFunctions,
+    mw._workflowId,
+  );
+
   // ── Execute tool ─────────────────────────────────────────────────────────────
   let toolResult: unknown;
+  // Capture approval state before unregisterActivity clears it in the finally block.
+  let wasApproved = false;
   try {
     while (true) {
       try {
         toolResult = await runWithActivity(activityId, handler);
+        // Some LangChain tools (e.g. Wikipedia) catch HTTP errors internally and
+        // return them as strings rather than throwing. The hook still set the abort
+        // flag before throwing — check it here so approval is triggered even when
+        // the GovernanceBlockedError never propagated to this catch block.
+        if (hasActivityAbort(activityId)) {
+          await pollApprovalOrHalt(mw, activityId, toolName);
+          markActivityApproved(activityId);
+          clearActivityAbort(activityId);
+          continue;
+        }
         break;
       } catch (err) {
         const hookErr =
           err instanceof GovernanceBlockedError ? err : extractGovernanceBlocked(err);
         if (hookErr?.verdict === 'require_approval') {
           await pollApprovalOrHalt(mw, activityId, toolName);
+          markActivityApproved(activityId);
           clearActivityAbort(activityId);
           continue;
         }
 
         const failEndMs = Date.now();
-        if (mw._config.sendToolEndEvent) {
+        if (mw._config.sendToolEndEvent && !isActivityApproved(activityId)) {
           await evaluate(mw, {
             ...baseEventFields(mw),
             event_type: 'ToolCompleted',
@@ -99,6 +121,8 @@ export async function handleWrapToolCall(
         throw err;
       }
     }
+    // Capture BEFORE finally runs — unregisterActivity clears _approvedActivities.
+    wasApproved = isActivityApproved(activityId);
   } finally {
     unregisterActivity(activityId);
   }
@@ -114,22 +138,29 @@ export async function handleWrapToolCall(
         ? safeSerialize({ result: toolResult })
         : safeSerialize(toolResult);
 
-    const resp = await evaluate(mw, {
-      ...baseEventFields(mw),
-      event_type: 'ToolCompleted',
-      activity_id: `${activityId}-c`,
-      activity_type: toolName,
-      activity_output: serializedOutput,
-      tool_name: toolName,
-      tool_type: toolType,
-      status: 'completed',
-      duration_ms,
-    } as LangChainGovernanceEvent);
+    // Skip evaluate entirely when already approved — sending ToolCompleted to Core
+    // would trigger the same policy again and create a spurious approval request on
+    // the dashboard. The ToolStarted approval already covers the full tool call.
+    // Use wasApproved (captured before finally) because unregisterActivity already
+    // cleared _approvedActivities by the time we reach here.
+    if (!wasApproved) {
+      const resp = await evaluate(mw, {
+        ...baseEventFields(mw),
+        event_type: 'ToolCompleted',
+        activity_id: `${activityId}-c`,
+        activity_type: toolName,
+        activity_output: serializedOutput,
+        tool_name: toolName,
+        tool_type: toolType,
+        status: 'completed',
+        duration_ms,
+      } as LangChainGovernanceEvent);
 
-    if (resp != null) {
-      const result = enforceVerdict(resp, 'tool_end');
-      if (result.requiresHitl) {
-        await pollApprovalOrHalt(mw, `${activityId}-c`, toolName);
+      if (resp != null) {
+        const result = enforceVerdict(resp, 'tool_end');
+        if (result.requiresHitl) {
+          await pollApprovalOrHalt(mw, `${activityId}-c`, toolName, result.approvalId);
+        }
       }
     }
   }

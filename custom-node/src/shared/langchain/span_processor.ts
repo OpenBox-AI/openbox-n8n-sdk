@@ -49,6 +49,9 @@ interface ActiveEntry {
 // Global registry keyed by activityId — only one entry active at a time per LLM call
 const _activeActivities = new Map<string, ActiveEntry>();
 const _activityAbort = new Map<string, string>();
+// Activities approved at ToolStarted/LLMStarted level — hook-level require_approval
+// verdicts are suppressed for these so one approval covers the full tool execution.
+const _approvedActivities = new Set<string>();
 const _activityScope = new AsyncLocalStorage<string>();
 const _recentHttpSpans = new Map<string, number>();
 const _recentHttpSpanTtlMs = 1000;
@@ -144,6 +147,10 @@ async function evaluateHookSpan(
   entry: ActiveEntry,
   spanData: Record<string, unknown>,
 ): Promise<void> {
+  // Skip Core request entirely when already approved — prevents Core from creating
+  // spurious approval requests for every HTTP call inside the same tool execution.
+  // The ToolStarted approval already covers the full tool call.
+  if (_approvedActivities.has(entry.ctx.activity_id)) return;
   if (isDuplicateHttpSpan(entry.ctx.activity_id, spanData)) return;
   const payload: Record<string, unknown> = {
     ...entry.ctx,
@@ -194,6 +201,7 @@ export async function evaluateActivitySpan(
   activityId: string,
   spanData: Record<string, unknown>,
 ): Promise<void> {
+  if (_approvedActivities.has(activityId)) return;
   const abortReason = _activityAbort.get(activityId);
   if (abortReason) {
     throw new GovernanceBlockedError('require_approval', abortReason);
@@ -215,6 +223,11 @@ function handleHookVerdict(
   if (response == null) return;
   const verdict = verdictFromString(response.verdict ?? response.arm ?? response.action);
   if (verdict === 'block' || verdict === 'halt' || verdict === 'require_approval') {
+    // If already approved at ToolStarted/LLMStarted level, don't re-block on the
+    // HTTP hook event — one approval covers the full tool execution.
+    if (verdict === 'require_approval' && _approvedActivities.has(activityId)) {
+      return;
+    }
     const reason =
       response.reason ??
       (verdict === 'require_approval' ? 'Approval required - blocked at hook level' : 'Blocked by governance');
@@ -270,6 +283,13 @@ function patchFetch(): void {
 
     const entry = _activeActivities.get(activityId as string);
     if (!entry) return captured(input, init);
+
+    // Activity was already approved at ToolStarted/LLMStarted level — bypass ALL
+    // hook evaluation for this request so Core never sees it and creates no extra
+    // approval entries on the dashboard.
+    if (_approvedActivities.has(activityId as string)) {
+      return captured(input, init);
+    }
 
     const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
     const startMs = Date.now();
@@ -361,6 +381,9 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
       if (!activityId) return Reflect.apply(originalRequest, this, args);
       const entry = _activeActivities.get(activityId);
       if (!entry) return Reflect.apply(originalRequest, this, args);
+
+      // Bypass all hook evaluation when already approved — same guard as patchedFetch.
+      if (_approvedActivities.has(activityId)) return Reflect.apply(originalRequest, this, args);
 
       const startMs = Date.now();
       const reqBodyChunks: Buffer[] = [];
@@ -563,12 +586,39 @@ export function clearActivityAbort(activityId: string): void {
 }
 
 /**
+ * Mark an activity as approved so subsequent HTTP hook verdicts of
+ * require_approval are suppressed for the rest of this tool execution.
+ * Call this after pollApprovalOrHalt() returns at ToolStarted/LLMStarted level.
+ */
+export function markActivityApproved(activityId: string): void {
+  _approvedActivities.add(activityId);
+}
+
+/**
+ * True when the hook set an abort for this activity.
+ * Used to detect require_approval blocks that the tool swallowed internally
+ * (returned the error as a string) rather than propagating as an exception.
+ */
+export function hasActivityAbort(activityId: string): boolean {
+  return _activityAbort.has(activityId);
+}
+
+/**
+ * True when this activity was already approved (at ToolStarted/LLMStarted level).
+ * Used to skip HITL at ToolCompleted/LLMCompleted — one approval covers the full call.
+ */
+export function isActivityApproved(activityId: string): boolean {
+  return _approvedActivities.has(activityId);
+}
+
+/**
  * Unregister an LLM activity after the model call completes.
  * Mirrors Python's span_processor.clear_activity_context().
  */
 export function unregisterActivity(activityId: string): void {
   _activeActivities.delete(activityId);
   _activityAbort.delete(activityId);
+  _approvedActivities.delete(activityId);
 }
 
 /**

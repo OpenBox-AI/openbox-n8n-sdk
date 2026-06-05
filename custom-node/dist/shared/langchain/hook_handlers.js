@@ -12,6 +12,7 @@ exports.handleWrapMemoryOp = handleWrapMemoryOp;
 const hooks_1 = require("./hooks");
 const hitl_1 = require("./hitl");
 const span_processor_1 = require("./span_processor");
+const openbox_client_1 = require("../openbox-client");
 const types_1 = require("./types");
 const verdict_1 = require("./verdict");
 // ═══════════════════════════════════════════════════════════════════
@@ -22,6 +23,16 @@ async function handleBeforeAgent(mw, state, threadId = 'n8n') {
     mw._workflowId = `${threadId}-${turn.slice(0, 8)}`;
     mw._runId = `${threadId}-run-${turn.slice(8, 16)}`;
     mw._client.updateTraceId(mw._workflowId);
+    // The constructor adds OPENBOX_API_URL to _ignoredPrefixes, but the actual
+    // URL for requests comes from the n8n credential (openboxUrl), which may
+    // differ. Ensure it is ignored so HTTP calls to Core made while a tool
+    // activity is registered don't get intercepted as hook spans and sent back
+    // to Core a second time, creating duplicate approval requests.
+    try {
+        const creds = await (0, openbox_client_1.getOpenBoxCredentials)(mw._client.executeFunctions);
+        (0, span_processor_1.addIgnoredPrefix)(creds.openboxUrl);
+    }
+    catch { /* non-fatal — constructor already added the env-var URL */ }
     const messages = state.messages ?? [];
     const userPrompt = (0, hooks_1.extractLastUserMessage)(messages);
     // SignalReceived — user prompt as trigger
@@ -134,7 +145,8 @@ async function handleWrapModelCall(mw, messages, handler) {
     if (startResponse != null) {
         const result = (0, verdict_1.enforceVerdict)(startResponse, 'llm_start');
         if (result.requiresHitl) {
-            await (0, hitl_1.pollApprovalOrHalt)(mw, activityId, 'llm_call');
+            await (0, hitl_1.pollApprovalOrHalt)(mw, activityId, 'llm_call', result.approvalId);
+            (0, span_processor_1.markActivityApproved)(activityId);
         }
     }
     // ── Layer 2: HTTP span collector (mirrors Python's WorkflowSpanProcessor +
@@ -150,6 +162,7 @@ async function handleWrapModelCall(mw, messages, handler) {
     }, mw._client.executeFunctions, mw._workflowId);
     // Call the model — https.request patch fires automatically
     let modelResponse;
+    let llmWasApproved = false;
     try {
         while (true) {
             try {
@@ -160,20 +173,24 @@ async function handleWrapModelCall(mw, messages, handler) {
                 const hookErr = (0, hooks_1.extractGovernanceBlocked)(err);
                 if (hookErr?.verdict === 'require_approval') {
                     await (0, hitl_1.pollApprovalOrHalt)(mw, activityId, 'llm_call');
+                    (0, span_processor_1.markActivityApproved)(activityId);
                     (0, span_processor_1.clearActivityAbort)(activityId);
                     continue;
                 }
                 throw err;
             }
         }
+        // Capture BEFORE finally runs — unregisterActivity clears _approvedActivities.
+        llmWasApproved = (0, span_processor_1.isActivityApproved)(activityId);
     }
     finally {
         (0, span_processor_1.unregisterActivity)(activityId);
     }
     const endMs = Date.now();
     const duration_ms = endMs - startMs;
-    // LLMCompleted
-    if (mw._config.sendLlmEndEvent) {
+    // LLMCompleted — skip evaluate entirely when already approved to avoid
+    // spurious approval requests on Core for the same activity_type.
+    if (mw._config.sendLlmEndEvent && !llmWasApproved) {
         const meta = (0, hooks_1.extractResponseMetadata)(modelResponse);
         const resp = await (0, hooks_1.evaluate)(mw, {
             ...(0, hooks_1.baseEventFields)(mw),
@@ -190,7 +207,10 @@ async function handleWrapModelCall(mw, messages, handler) {
             completion: meta.completion,
         });
         if (resp != null) {
-            (0, verdict_1.enforceVerdict)(resp, 'llm_end');
+            const endResult = (0, verdict_1.enforceVerdict)(resp, 'llm_end');
+            if (endResult.requiresHitl) {
+                await (0, hitl_1.pollApprovalOrHalt)(mw, `${activityId}-c`, 'llm_call', endResult.approvalId);
+            }
         }
     }
     return modelResponse;

@@ -22,14 +22,7 @@ import {
   NodeOperationError,
 } from 'n8n-workflow';
 
-import {
-  testOpenBoxCredential,
-  testMysqlCredential,
-  testMongoDbCredential,
-  testPostgresCredential,
-  testRedisCredential,
-  testSearXngCredential,
-} from '../../shared/credential-test';
+import { testOpenBoxCredential } from '../../shared/credential-test';
 import {
   GovernanceBlockedError,
   GovernanceHaltError,
@@ -122,9 +115,8 @@ export class OpenBoxAgent implements INodeType {
     icon: 'file:OB_logomark.png',
     group: ['transform'],
     version: 1,
-    subtitle: '={{$parameter["options"]["systemMessage"] ? "Custom System Prompt" : ""}}',
     description:
-      'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes. Sends the same lifecycle events as the LangChain Python SDK.',
+      'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes.',
     defaults: { name: 'OpenBox: Agent' },
     inputs: [
       NodeConnectionTypes.Main,
@@ -133,6 +125,13 @@ export class OpenBoxAgent implements INodeType {
         displayName: 'Chat Model',
         required: true,
         maxConnections: 1,
+        filter: {
+          excludedNodes: [
+            '@n8n/n8n-nodes-langchain.lmCohere',
+            '@n8n/n8n-nodes-langchain.lmOllama',
+            '@n8n/n8n-nodes-langchain.lmOpenHuggingFaceInference',
+          ],
+        },
       },
       {
         type: NodeConnectionTypes.AiMemory,
@@ -149,38 +148,52 @@ export class OpenBoxAgent implements INodeType {
     outputs: [NodeConnectionTypes.Main] as unknown as INodeTypeDescription['outputs'],
     credentials: [
       { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
-      { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
-      { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
-      { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
-      { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
-      { name: 'searXngApi', required: false, testedBy: 'searXngConnectionTest' },
     ],
     properties: [
+      // ── Prompt source ───────────────────────────────────────────────────────
       {
-        displayName: 'Prompt',
+        displayName: 'Source for Prompt (User Message)',
         name: 'promptType',
         type: 'options',
         options: [
           {
-            name: 'Take from Previous Node Automatically',
+            name: 'Connected Chat Trigger Node',
             value: 'auto',
             description:
-              'Looks for chatInput, text, message, input, query, or the first string field',
+              "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
           },
-          { name: 'Define Below', value: 'define' },
+          {
+            name: 'Define below',
+            value: 'define',
+            description:
+              'Use an expression to reference data in previous nodes or enter static text',
+          },
         ],
         default: 'auto',
         noDataExpression: true,
       },
+      // Shown when auto — mirrors textFromPreviousNode in the official agent
       {
-        displayName: 'Text',
+        displayName: 'Prompt (User Message)',
         name: 'text',
         type: 'string',
         required: true,
+        default: '={{ $json.chatInput }}',
+        displayOptions: { show: { promptType: ['auto'] } },
         typeOptions: { rows: 2 },
-        default: '',
-        displayOptions: { show: { promptType: ['define'] } },
       },
+      // Shown when define — mirrors textInput in the official agent
+      {
+        displayName: 'Prompt (User Message)',
+        name: 'text',
+        type: 'string',
+        required: true,
+        default: '',
+        placeholder: 'e.g. Hello, how can you help me?',
+        displayOptions: { show: { promptType: ['define'] } },
+        typeOptions: { rows: 2 },
+      },
+      // ── Options ─────────────────────────────────────────────────────────────
       {
         displayName: 'Options',
         name: 'options',
@@ -192,16 +205,32 @@ export class OpenBoxAgent implements INodeType {
             displayName: 'System Message',
             name: 'systemMessage',
             type: 'string',
-            typeOptions: { rows: 4 },
-            default:
-              'You are a helpful assistant. Use the tools available to you to answer questions accurately.',
+            typeOptions: { rows: 6 },
+            default: 'You are a helpful assistant',
+            description: 'The message that will be sent to the agent before the conversation starts',
           },
           {
             displayName: 'Max Iterations',
             name: 'maxIterations',
             type: 'number',
-            typeOptions: { minValue: 1, maxValue: 50 },
             default: 10,
+            description: 'The maximum number of iterations the agent will run before stopping',
+          },
+          {
+            displayName: 'Return Intermediate Steps',
+            name: 'returnIntermediateSteps',
+            type: 'boolean',
+            default: false,
+            description:
+              'Whether or not the output should include intermediate steps the agent took',
+          },
+          {
+            displayName: 'Automatically Passthrough Binary Images',
+            name: 'passthroughBinaryImages',
+            type: 'boolean',
+            default: true,
+            description:
+              'Whether or not binary images should be automatically passed through to the agent as image type messages',
           },
         ],
       },
@@ -211,11 +240,6 @@ export class OpenBoxAgent implements INodeType {
   methods = {
     credentialTest: {
       openBoxApiCredentialTest: testOpenBoxCredential,
-      postgresConnectionTest: testPostgresCredential,
-      mysqlConnectionTest: testMysqlCredential,
-      mongoDbConnectionTest: testMongoDbCredential,
-      redisConnectionTest: testRedisCredential,
-      searXngConnectionTest: testSearXngCredential,
     },
   };
 
@@ -241,8 +265,10 @@ export class OpenBoxAgent implements INodeType {
     const options = this.getNodeParameter('options', 0, {}) as {
       systemMessage?: string;
       maxIterations?: number;
+      returnIntermediateSteps?: boolean;
+      passthroughBinaryImages?: boolean;
     };
-    const systemMessage = options.systemMessage ?? 'You are a helpful assistant.';
+    const systemMessage = options.systemMessage ?? 'You are a helpful assistant';
     const maxIterations = options.maxIterations ?? 10;
     const promptType = this.getNodeParameter('promptType', 0, 'auto') as string;
     const workflowType = `n8n.Agent.${this.getNode().name.replace(/\s+/g, '_')}`;

@@ -104,8 +104,7 @@ class OpenBoxAgent {
         icon: 'file:OB_logomark.png',
         group: ['transform'],
         version: 1,
-        subtitle: '={{$parameter["options"]["systemMessage"] ? "Custom System Prompt" : ""}}',
-        description: 'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes. Sends the same lifecycle events as the LangChain Python SDK.',
+        description: 'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes.',
         defaults: { name: 'OpenBox: Agent' },
         inputs: [
             n8n_workflow_1.NodeConnectionTypes.Main,
@@ -114,6 +113,13 @@ class OpenBoxAgent {
                 displayName: 'Chat Model',
                 required: true,
                 maxConnections: 1,
+                filter: {
+                    excludedNodes: [
+                        '@n8n/n8n-nodes-langchain.lmCohere',
+                        '@n8n/n8n-nodes-langchain.lmOllama',
+                        '@n8n/n8n-nodes-langchain.lmOpenHuggingFaceInference',
+                    ],
+                },
             },
             {
                 type: n8n_workflow_1.NodeConnectionTypes.AiMemory,
@@ -130,37 +136,50 @@ class OpenBoxAgent {
         outputs: [n8n_workflow_1.NodeConnectionTypes.Main],
         credentials: [
             { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
-            { name: 'postgres', required: false, testedBy: 'postgresConnectionTest' },
-            { name: 'mySql', required: false, testedBy: 'mysqlConnectionTest' },
-            { name: 'mongoDb', required: false, testedBy: 'mongoDbConnectionTest' },
-            { name: 'redis', required: false, testedBy: 'redisConnectionTest' },
-            { name: 'searXngApi', required: false, testedBy: 'searXngConnectionTest' },
         ],
         properties: [
+            // ── Prompt source ───────────────────────────────────────────────────────
             {
-                displayName: 'Prompt',
+                displayName: 'Source for Prompt (User Message)',
                 name: 'promptType',
                 type: 'options',
                 options: [
                     {
-                        name: 'Take from Previous Node Automatically',
+                        name: 'Connected Chat Trigger Node',
                         value: 'auto',
-                        description: 'Looks for chatInput, text, message, input, query, or the first string field',
+                        description: "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
                     },
-                    { name: 'Define Below', value: 'define' },
+                    {
+                        name: 'Define below',
+                        value: 'define',
+                        description: 'Use an expression to reference data in previous nodes or enter static text',
+                    },
                 ],
                 default: 'auto',
                 noDataExpression: true,
             },
+            // Shown when auto — mirrors textFromPreviousNode in the official agent
             {
-                displayName: 'Text',
+                displayName: 'Prompt (User Message)',
                 name: 'text',
                 type: 'string',
                 required: true,
+                default: '={{ $json.chatInput }}',
+                displayOptions: { show: { promptType: ['auto'] } },
                 typeOptions: { rows: 2 },
-                default: '',
-                displayOptions: { show: { promptType: ['define'] } },
             },
+            // Shown when define — mirrors textInput in the official agent
+            {
+                displayName: 'Prompt (User Message)',
+                name: 'text',
+                type: 'string',
+                required: true,
+                default: '',
+                placeholder: 'e.g. Hello, how can you help me?',
+                displayOptions: { show: { promptType: ['define'] } },
+                typeOptions: { rows: 2 },
+            },
+            // ── Options ─────────────────────────────────────────────────────────────
             {
                 displayName: 'Options',
                 name: 'options',
@@ -172,15 +191,30 @@ class OpenBoxAgent {
                         displayName: 'System Message',
                         name: 'systemMessage',
                         type: 'string',
-                        typeOptions: { rows: 4 },
-                        default: 'You are a helpful assistant. Use the tools available to you to answer questions accurately.',
+                        typeOptions: { rows: 6 },
+                        default: 'You are a helpful assistant',
+                        description: 'The message that will be sent to the agent before the conversation starts',
                     },
                     {
                         displayName: 'Max Iterations',
                         name: 'maxIterations',
                         type: 'number',
-                        typeOptions: { minValue: 1, maxValue: 50 },
                         default: 10,
+                        description: 'The maximum number of iterations the agent will run before stopping',
+                    },
+                    {
+                        displayName: 'Return Intermediate Steps',
+                        name: 'returnIntermediateSteps',
+                        type: 'boolean',
+                        default: false,
+                        description: 'Whether or not the output should include intermediate steps the agent took',
+                    },
+                    {
+                        displayName: 'Automatically Passthrough Binary Images',
+                        name: 'passthroughBinaryImages',
+                        type: 'boolean',
+                        default: true,
+                        description: 'Whether or not binary images should be automatically passed through to the agent as image type messages',
                     },
                 ],
             },
@@ -189,11 +223,6 @@ class OpenBoxAgent {
     methods = {
         credentialTest: {
             openBoxApiCredentialTest: credential_test_1.testOpenBoxCredential,
-            postgresConnectionTest: credential_test_1.testPostgresCredential,
-            mysqlConnectionTest: credential_test_1.testMysqlCredential,
-            mongoDbConnectionTest: credential_test_1.testMongoDbCredential,
-            redisConnectionTest: credential_test_1.testRedisCredential,
-            searXngConnectionTest: credential_test_1.testSearXngCredential,
         },
     };
     async execute() {
@@ -210,7 +239,7 @@ class OpenBoxAgent {
             throw new n8n_workflow_1.NodeOperationError(this.getNode(), 'No Chat Model connected. Drag a language model sub-node (e.g. "OpenAI Chat Model") into the Chat Model input.');
         }
         const options = this.getNodeParameter('options', 0, {});
-        const systemMessage = options.systemMessage ?? 'You are a helpful assistant.';
+        const systemMessage = options.systemMessage ?? 'You are a helpful assistant';
         const maxIterations = options.maxIterations ?? 10;
         const promptType = this.getNodeParameter('promptType', 0, 'auto');
         const workflowType = `n8n.Agent.${this.getNode().name.replace(/\s+/g, '_')}`;

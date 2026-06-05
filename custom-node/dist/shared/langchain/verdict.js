@@ -60,7 +60,8 @@ function enforceVerdict(response, phase) {
         throw new GuardrailsValidationError(reasons);
     }
     if (arm === 'require_approval') {
-        return { requiresHitl: true };
+        const approvalId = response.approval_id ?? response.approvalId ?? response.id;
+        return { requiresHitl: true, approvalId };
     }
     return { requiresHitl: false };
 }

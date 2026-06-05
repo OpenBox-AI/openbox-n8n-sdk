@@ -9,6 +9,7 @@ export async function pollApprovalOrHalt(
   mw: OpenBoxLangChainMiddleware,
   activityId: string,
   activityType: string,
+  approvalId?: string,
 ): Promise<void> {
   if (!mw._config.hitl.enabled) {
     throw new GovernanceHaltError(`Approval required for activity ${activityType}`);
@@ -16,11 +17,14 @@ export async function pollApprovalOrHalt(
 
   const startedAt = Date.now();
   while (Date.now() - startedAt <= mw._config.hitl.timeoutMs) {
-    const response = await mw._client.pollApproval(mw._workflowId, mw._runId, activityId);
+    const response = await mw._client.pollApproval(mw._workflowId, mw._runId, activityId, approvalId);
     if (response == null) {
+      console.warn(`[OpenBox HITL] poll returned null for activity=${activityType} activityId=${activityId} approvalId=${approvalId}`);
       await sleep(mw._config.hitl.pollIntervalMs);
       continue;
     }
+
+    console.log(`[OpenBox HITL] poll response for activity=${activityType} activityId=${activityId} approvalId=${approvalId}:`, JSON.stringify(response));
 
     if (response.expired) {
       throw new GovernanceHaltError(
@@ -28,7 +32,9 @@ export async function pollApprovalOrHalt(
       );
     }
 
-    const verdict = verdictFromString(response.verdict ?? response.action);
+    const verdict = verdictFromString(response.arm ?? response.verdict ?? response.action);
+    console.log(`[OpenBox HITL] resolved verdict="${verdict}" from arm=${response.arm} verdict=${response.verdict} action=${response.action}`);
+
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {
       throw new GovernanceHaltError(
