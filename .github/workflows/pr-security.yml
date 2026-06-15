@@ -1,5 +1,9 @@
 name: PR Security
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GITLEAKS_VERSION: "8.30.0"
+
 on:
   pull_request:
     branches:
@@ -23,9 +27,6 @@ permissions:
 concurrency:
   group: pr-security-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
-env:
-  GITLEAKS_VERSION: "8.30.0"
 
 jobs:
   trivy-scan:

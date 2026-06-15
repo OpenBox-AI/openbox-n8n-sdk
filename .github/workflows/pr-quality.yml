@@ -1,5 +1,9 @@
 name: PR Quality
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NODE_VERSION: "24"
+
 on:
   pull_request:
     branches:
@@ -22,9 +26,6 @@ permissions:
 concurrency:
   group: pr-quality-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
-env:
-  NODE_VERSION: "20"
 
 jobs:
   build-and-test:

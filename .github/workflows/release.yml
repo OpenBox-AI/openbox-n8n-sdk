@@ -28,7 +28,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: "20"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NODE_VERSION: "24"
   GITLEAKS_VERSION: "8.30.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,8 +70,7 @@ jobs:
             "custom-node/README.md"
             "custom-node/tsconfig.json"
             "LICENSE"
-            "SECURITY.md"
-            "CODE_OF_CONDUCT.md"
+            "README.md"
           )
           for f in "${required_files[@]}"; do
             if [ ! -f "${f}" ]; then
