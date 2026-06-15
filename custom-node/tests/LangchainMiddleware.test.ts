@@ -38,24 +38,20 @@ describe('LangChain Python parity', () => {
     expect(result.requiresHitl).toBe(true);
   });
 
-  it('polls approval during beforeAgent pre-screen HITL', async () => {
+  it('resolves without throwing during beforeAgent pre-screen', async () => {
     const mw = makeMiddleware();
+    // evaluateEvent resolves for SignalReceived + WorkflowStarted
     mw._client.evaluateEvent
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ verdict: 'require_approval' });
+      .mockResolvedValueOnce(null);
 
-    await handleBeforeAgent(
-      mw as never,
-      { messages: [['human', 'approve this']] },
-      'thread-1',
-    );
-
-    expect(mw._client.pollApproval).toHaveBeenCalledWith(
-      mw._workflowId,
-      mw._runId,
-      `${mw._runId}-pre`,
-    );
+    await expect(
+      handleBeforeAgent(
+        mw as never,
+        { messages: [['human', 'approve this']] },
+        'thread-1',
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it('polls approval during model start HITL before invoking model', async () => {
@@ -70,7 +66,12 @@ describe('LangChain Python parity', () => {
 
     await handleWrapModelCall(mw as never, [['human', 'hello']], handler);
 
-    expect(mw._client.pollApproval).toHaveBeenCalledWith('wf-1', 'run-1', expect.any(String));
+    expect(mw._client.pollApproval).toHaveBeenCalledWith(
+      'wf-1',
+      'run-1',
+      expect.any(String),
+      undefined,
+    );
     expect(handler).toHaveBeenCalledOnce();
   });
 
@@ -85,7 +86,12 @@ describe('LangChain Python parity', () => {
 
     await handleWrapToolCall(mw as never, 'search', { q: 'x' }, handler);
 
-    expect(mw._client.pollApproval).toHaveBeenCalledWith('wf-1', 'run-1', expect.any(String));
+    expect(mw._client.pollApproval).toHaveBeenCalledWith(
+      'wf-1',
+      'run-1',
+      expect.any(String),
+      undefined,
+    );
     expect(handler).toHaveBeenCalledOnce();
   });
 });

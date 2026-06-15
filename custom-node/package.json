@@ -1,15 +1,38 @@
 {
   "name": "n8n-nodes-openbox-hook",
   "version": "0.0.1",
-  "private": true,
-  "description": "OpenBox governance node for n8n (example)",
+  "description": "OpenBox governance community node for n8n",
   "license": "MIT",
+  "author": "OpenBox AI",
+  "homepage": "https://github.com/OpenBox-AI/openbox-sdk/tree/main/example/n8n/custom-node#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenBox-AI/openbox-sdk.git",
+    "directory": "example/n8n/custom-node"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenBox-AI/openbox-sdk/issues"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "openbox",
+    "governance",
+    "ai-agents",
+    "guardrails",
+    "langchain"
+  ],
   "main": "dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js",
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
+    "clean": "node scripts/clean-dist.js",
+    "prebuild": "npm run clean",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
+    "prepack": "npm run build",
+    "release": "npm version",
     "smoke:load": "node -e \"require('./dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js'); console.log('node-load-ok')\"",
     "test": "vitest run",
     "test:watch": "vitest watch"
