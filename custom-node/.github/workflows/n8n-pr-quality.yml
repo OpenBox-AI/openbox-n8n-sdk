@@ -1,0 +1,85 @@
+name: PR Quality
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'example/n8n/custom-node/**'
+      - '.github/workflows/n8n-*'
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+  push:
+    branches:
+      - main
+    paths:
+      - 'example/n8n/custom-node/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: n8n-pr-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: example/n8n/custom-node
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: example/n8n/custom-node/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test (node load)
+        run: npm run smoke:load
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Verify pack contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack_output=$(npm pack --dry-run 2>&1)
+          echo "$pack_output"
+          # Fail if dist/ is not included
+          if ! echo "$pack_output" | grep -q "dist/"; then
+            echo "ERROR: dist/ not found in pack output — run 'npm run build' first"
+            exit 1
+          fi
+          # Fail if unexpected top-level files are bundled (e.g. src/)
+          if echo "$pack_output" | grep -q "^npm notice.*src/"; then
+            echo "ERROR: src/ found in pack output — check the 'files' field in package.json"
+            exit 1
+          fi
+          echo "Pack contents look correct."
