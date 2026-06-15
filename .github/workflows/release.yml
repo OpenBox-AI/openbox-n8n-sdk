@@ -1,36 +1,30 @@
-name: Release n8n Node
+name: Release
 
-# Triggers on semver tags pushed from inside example/n8n/custom-node.
-# Run locally to start a release:
+# Triggers on semver tags. To release:
 #
-#   cd example/n8n/custom-node
-#   npm version patch|minor|major   # bumps package.json + creates git tag
-#   git push && git push --tags     # push commit + tag → triggers this workflow
+#   cd custom-node
+#   npm version patch|minor|major   # bumps package.json, commits, creates git tag
+#   git push && git push --tags     # triggers this workflow
 #
 # One-time npm setup (OIDC Trusted Publishing — no long-lived secrets):
-#   1. Log in to npmjs.com → package settings → Publish access → Trusted Publishers.
-#   2. Add a publisher: GitHub Actions, owner=OpenBox-AI, repo=openbox-sdk, workflow=n8n-release.yml
-#   3. Leave NPM_TOKEN unset. GitHub's OIDC token is used instead.
+#   1. npmjs.com → package settings → Publish access → Trusted Publishers
+#   2. Add: GitHub Actions, owner=OpenBox-AI, repo=openbox-n8n-sdk, workflow=release.yml
+#   3. Leave NPM_TOKEN unset — GitHub OIDC is used automatically.
 #
-# Fallback (npm token):
-#   Add NPM_TOKEN to repo secrets (Settings → Secrets → Actions).
+# Fallback: add NPM_TOKEN to repo secrets (Settings → Secrets → Actions).
 
 on:
   push:
     tags:
-      - "n8n-*.*.*"
+      - "*.*.*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Semver tag to release (e.g. 0.1.2)"
-        required: true
 
 permissions:
   contents: write
   id-token: write
 
 concurrency:
-  group: n8n-release-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -39,7 +33,6 @@ env:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — Governance
-# Validates tag format and presence of required files before anything builds.
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
   release-governance:
@@ -58,35 +51,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Accepts n8n-X.Y.Z tags (pushed by `npm version`) and bare X.Y.Z
-          # (workflow_dispatch with manual tag input).
-          version="${TAG_NAME#n8n-}"
           pattern='^[0-9]+\.[0-9]+\.[0-9]+$'
-          if [[ ! "${version}" =~ ${pattern} ]]; then
+          if [[ ! "${TAG_NAME}" =~ ${pattern} ]]; then
             echo "Invalid release tag: ${TAG_NAME}"
-            echo "Expected format: n8n-<major>.<minor>.<patch>"
+            echo "Expected format: <major>.<minor>.<patch>"
             exit 1
           fi
-          echo "Tag is valid: ${TAG_NAME} → version ${version}"
+          echo "Tag is valid: ${TAG_NAME}"
 
       - name: Verify required files exist
         shell: bash
         run: |
           set -euo pipefail
-          # Files that must exist in the custom-node package
-          package_files=(
-            "example/n8n/custom-node/package.json"
-            "example/n8n/custom-node/package-lock.json"
-            "example/n8n/custom-node/tsconfig.json"
-            "example/n8n/custom-node/README.md"
-          )
-          # Root-level governance files shared across the monorepo
-          root_files=(
+          required_files=(
+            "custom-node/package.json"
+            "custom-node/package-lock.json"
+            "custom-node/README.md"
+            "custom-node/tsconfig.json"
             "LICENSE"
             "SECURITY.md"
             "CODE_OF_CONDUCT.md"
           )
-          for f in "${package_files[@]}" "${root_files[@]}"; do
+          for f in "${required_files[@]}"; do
             if [ ! -f "${f}" ]; then
               echo "Missing required file: ${f}"
               exit 1
@@ -100,17 +86,15 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tag_version="${TAG_NAME#n8n-}"
-          pkg_version=$(node -p "require('./example/n8n/custom-node/package.json').version")
-          if [[ "${tag_version}" != "${pkg_version}" ]]; then
-            echo "Tag version (${tag_version}) does not match package.json version (${pkg_version})"
+          pkg_version=$(node -p "require('./custom-node/package.json').version")
+          if [[ "${TAG_NAME}" != "${pkg_version}" ]]; then
+            echo "Tag (${TAG_NAME}) does not match package.json version (${pkg_version})"
             exit 1
           fi
           echo "Version match: ${pkg_version}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — Quality
-# Full build → typecheck → unit tests → pack validation.
+# Stage 2 — Quality (runs after governance, parallel with security)
 # ─────────────────────────────────────────────────────────────────────────────
   release-quality:
     name: Release Quality
@@ -120,7 +104,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: example/n8n/custom-node
+        working-directory: custom-node
 
     steps:
       - name: Checkout repository
@@ -133,7 +117,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: example/n8n/custom-node/package-lock.json
+          cache-dependency-path: custom-node/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -163,9 +147,7 @@ jobs:
           echo "Pack contents look correct."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 3 — Security
-# Trivy dependency scan + Gitleaks secret scan.
-# Both run in parallel, both must pass before publish.
+# Stage 3a — Security: Trivy (parallel with quality and gitleaks)
 # ─────────────────────────────────────────────────────────────────────────────
   release-security-trivy:
     name: Release Security (Trivy)
@@ -193,7 +175,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trivy fs example/n8n/custom-node \
+          trivy fs custom-node \
             --scanners vuln,misconfig \
             --vuln-type library \
             --ignore-unfixed \
@@ -206,7 +188,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          trivy fs example/n8n/custom-node \
+          trivy fs custom-node \
             --scanners vuln,misconfig \
             --vuln-type library \
             --ignore-unfixed \
@@ -221,7 +203,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-n8n-release
+          category: trivy-release
 
       - name: Fail on vulnerabilities
         if: steps.trivy_console.outcome == 'failure'
@@ -229,6 +211,9 @@ jobs:
           echo "Trivy found HIGH/CRITICAL vulnerabilities. Release blocked."
           exit 1
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3b — Security: Gitleaks (parallel with quality and trivy)
+# ─────────────────────────────────────────────────────────────────────────────
   release-security-secrets:
     name: Release Security (Gitleaks)
     runs-on: ubuntu-latest
@@ -258,7 +243,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gitleaks dir example/n8n/custom-node \
+          gitleaks dir . \
             --no-banner \
             --exit-code 1 \
             --report-format sarif \
@@ -269,12 +254,10 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gitleaks-results.sarif
-          category: gitleaks-n8n-release
+          category: gitleaks-release
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 4 — Publish
-# Publishes to npm with provenance attestation (required by n8n Creator Portal
-# for verified community nodes since May 1 2026).
+# Stage 4 — Publish (only after all 3 prior stages pass)
 # ─────────────────────────────────────────────────────────────────────────────
   release-publish:
     name: Publish to npm
@@ -286,32 +269,25 @@ jobs:
 
     defaults:
       run:
-        working-directory: example/n8n/custom-node
+        working-directory: custom-node
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (with npm registry auth)
+      - name: Set up Node.js (with npm registry)
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
           cache: npm
-          cache-dependency-path: example/n8n/custom-node/package-lock.json
+          cache-dependency-path: custom-node/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build
         run: npm run build
-
-      - name: Configure npm token (Option B fallback)
-        if: env.NPM_TOKEN != ''
-        shell: bash
-        run: npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public

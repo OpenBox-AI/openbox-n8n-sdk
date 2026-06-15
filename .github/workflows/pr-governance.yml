@@ -4,9 +4,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'example/n8n/custom-node/**'
-      - '.github/workflows/n8n-*'
     types:
       - opened
       - reopened
@@ -16,8 +13,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'example/n8n/custom-node/**'
   workflow_dispatch:
 
 permissions:
@@ -25,7 +20,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: n8n-pr-governance-${{ github.event.pull_request.number || github.ref }}
+  group: pr-governance-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -69,30 +64,20 @@ jobs:
 
       - name: Verify required files exist
         shell: bash
-        working-directory: example/n8n/custom-node
         run: |
           set -euo pipefail
           required_files=(
-            "package.json"
-            "package-lock.json"
-            "README.md"
-            "tsconfig.json"
-          )
-          # Root-level governance files
-          root_files=(
-            "../../../LICENSE"
-            "../../../SECURITY.md"
-            "../../../CODE_OF_CONDUCT.md"
+            "custom-node/package.json"
+            "custom-node/package-lock.json"
+            "custom-node/README.md"
+            "custom-node/tsconfig.json"
+            "LICENSE"
+            "SECURITY.md"
+            "CODE_OF_CONDUCT.md"
           )
           for file in "${required_files[@]}"; do
             if [ ! -f "${file}" ]; then
-              echo "Missing required file: example/n8n/custom-node/${file}"
-              exit 1
-            fi
-          done
-          for file in "${root_files[@]}"; do
-            if [ ! -f "${file}" ]; then
-              echo "Missing required root governance file: ${file}"
+              echo "Missing required file: ${file}"
               exit 1
             fi
           done

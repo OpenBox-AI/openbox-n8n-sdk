@@ -4,9 +4,6 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - 'example/n8n/custom-node/**'
-      - '.github/workflows/n8n-*'
     types:
       - opened
       - reopened
@@ -15,8 +12,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'example/n8n/custom-node/**'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +21,7 @@ permissions:
   security-events: write
 
 concurrency:
-  group: n8n-pr-security-${{ github.event.pull_request.number || github.ref }}
+  group: pr-security-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -53,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trivy fs example/n8n/custom-node \
+          trivy fs custom-node \
             --scanners vuln,misconfig \
             --vuln-type library \
             --ignore-unfixed \
@@ -63,11 +58,10 @@ jobs:
             --exit-code 1
 
       - name: Run Trivy filesystem scan (SARIF)
-        id: trivy_sarif
         if: always()
         shell: bash
         run: |
-          trivy fs example/n8n/custom-node \
+          trivy fs custom-node \
             --scanners vuln,misconfig \
             --vuln-type library \
             --ignore-unfixed \
@@ -82,9 +76,9 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-n8n-custom-node
+          category: trivy-n8n-node
 
-      - name: Fail if Trivy found vulnerabilities
+      - name: Fail on vulnerabilities
         if: steps.trivy_console.outcome == 'failure'
         run: |
           echo "Trivy found HIGH/CRITICAL vulnerabilities. See Security tab for details."
@@ -109,11 +103,11 @@ jobs:
             | tar -xz -C /usr/local/bin gitleaks
           gitleaks version
 
-      - name: Run Gitleaks on custom-node directory
+      - name: Run Gitleaks
         shell: bash
         run: |
           set -euo pipefail
-          gitleaks dir example/n8n/custom-node \
+          gitleaks dir . \
             --no-banner \
             --exit-code 1 \
             --report-format sarif \
@@ -124,4 +118,4 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gitleaks-results.sarif
-          category: gitleaks-n8n-custom-node
+          category: gitleaks-n8n-node
