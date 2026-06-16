@@ -1,8 +1,8 @@
 FROM node:20-alpine AS builder
 WORKDIR /work/example/n8n/custom-node
 
-COPY example/n8n/custom-node/package.json ./
-RUN npm install --no-audit --no-fund
+COPY example/n8n/custom-node/package.json example/n8n/custom-node/package-lock.json ./
+RUN npm ci --no-audit --no-fund --ignore-scripts
 COPY example/n8n/custom-node ./
 RUN npm run build && npm prune --omit=dev --omit=optional
 

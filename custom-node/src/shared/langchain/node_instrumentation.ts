@@ -1,3 +1,4 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error, prefer-rest-params, @typescript-eslint/no-unused-vars */
 import type * as Fs from 'node:fs';
 
 import {

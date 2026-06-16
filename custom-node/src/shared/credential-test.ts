@@ -35,7 +35,10 @@ export async function testOpenBoxCredential(
   );
 
   try {
-    await this.helpers.request({
+    // n8n-workflow 1.x types don't declare httpRequest on ICredentialTestFunctions,
+    // but the runtime exposes it (the linter rule explicitly requires it).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (this.helpers as any).httpRequest({
       method: 'GET',
       url: `${creds.openboxUrl}${path}`,
       headers,

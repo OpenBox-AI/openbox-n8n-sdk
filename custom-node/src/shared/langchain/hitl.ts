@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import { GovernanceHaltError, verdictFromString } from './verdict';
 

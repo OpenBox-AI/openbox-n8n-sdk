@@ -92,6 +92,7 @@ export function safeSerialize(value: unknown): unknown {
 
 /** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 export function hexId(len: number = 32): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { randomBytes } = require('crypto') as typeof import('crypto');
   return randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 }

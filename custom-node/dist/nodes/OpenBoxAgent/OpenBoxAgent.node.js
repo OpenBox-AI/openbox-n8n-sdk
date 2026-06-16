@@ -101,9 +101,11 @@ class OpenBoxAgent {
     description = {
         displayName: 'OpenBox: Agent',
         name: 'openBoxAgent',
-        icon: 'file:OB_logomark.png',
+        icon: 'file:openbox.svg',
+        usableAsTool: true,
         group: ['transform'],
         version: 1,
+        subtitle: '={{$parameter["promptType"] === "auto" ? "Auto-detect prompt" : "Define prompt"}}',
         description: 'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes.',
         defaults: { name: 'OpenBox: Agent' },
         inputs: [
@@ -135,6 +137,7 @@ class OpenBoxAgent {
         ],
         outputs: [n8n_workflow_1.NodeConnectionTypes.Main],
         credentials: [
+            // eslint-disable-next-line @n8n/community-nodes/no-credential-reuse
             { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
         ],
         properties: [
@@ -228,6 +231,11 @@ class OpenBoxAgent {
     async execute() {
         const items = this.getInputData();
         const output = [];
+        let continueOnFail = false;
+        try {
+            continueOnFail = this.continueOnFail();
+        }
+        catch { /* not available in all contexts */ }
         // ── Retrieve connected sub-nodes ─────────────────────────────────────────
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const model = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiLanguageModel, 0));
@@ -403,14 +411,19 @@ class OpenBoxAgent {
             catch (err) {
                 if (loopError == null) {
                     mapGovernanceError(err, this, i);
-                    throw err;
+                    throw new n8n_workflow_1.NodeOperationError(this.getNode(), err, { itemIndex: i });
                 }
                 // non-fatal when we already have a loopError
             }
             // Re-throw loop error AFTER afterAgent has fired
             if (loopError != null) {
+                const nodeErr = new n8n_workflow_1.NodeOperationError(this.getNode(), loopError, { itemIndex: i });
+                if (continueOnFail) {
+                    output.push({ json: { error: nodeErr.message }, pairedItem: { item: i } });
+                    continue;
+                }
                 mapGovernanceError(loopError, this, i);
-                throw loopError;
+                throw nodeErr;
             }
             // Apply output redaction from WorkflowCompleted guardrails to the node's
             // OUTPUT only — memory already stores the true agent response above.

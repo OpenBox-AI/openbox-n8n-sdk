@@ -1,4 +1,5 @@
 "use strict";
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 /**
  * Tool governance hook — TypeScript port of middleware_tool_hook.py.
  *

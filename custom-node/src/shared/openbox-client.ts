@@ -1,3 +1,4 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 import {
   IExecuteFunctions,
   IHookFunctions,

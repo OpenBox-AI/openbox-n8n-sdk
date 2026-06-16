@@ -29,6 +29,7 @@ function safeSerialize(value) {
 }
 /** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 function hexId(len = 32) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { randomBytes } = require('crypto');
     return randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 }

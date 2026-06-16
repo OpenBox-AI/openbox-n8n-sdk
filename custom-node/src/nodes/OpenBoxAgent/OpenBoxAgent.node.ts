@@ -112,9 +112,11 @@ export class OpenBoxAgent implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'OpenBox: Agent',
     name: 'openBoxAgent',
-    icon: 'file:OB_logomark.png',
+    icon: 'file:openbox.svg',
+    usableAsTool: true,
     group: ['transform'],
     version: 1,
+    subtitle: '={{$parameter["promptType"] === "auto" ? "Auto-detect prompt" : "Define prompt"}}',
     description:
       'AI agent with OpenBox governance. Connect a Chat Model, Memory, and Tools as sub-nodes.',
     defaults: { name: 'OpenBox: Agent' },
@@ -147,6 +149,7 @@ export class OpenBoxAgent implements INodeType {
     ] as unknown as INodeTypeDescription['inputs'],
     outputs: [NodeConnectionTypes.Main] as unknown as INodeTypeDescription['outputs'],
     credentials: [
+      // eslint-disable-next-line @n8n/community-nodes/no-credential-reuse
       { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
     ],
     properties: [
@@ -246,6 +249,8 @@ export class OpenBoxAgent implements INodeType {
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
     const output: INodeExecutionData[] = [];
+    let continueOnFail = false;
+    try { continueOnFail = this.continueOnFail(); } catch { /* not available in all contexts */ }
 
     // ── Retrieve connected sub-nodes ─────────────────────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -477,15 +482,20 @@ export class OpenBoxAgent implements INodeType {
       } catch (err) {
         if (loopError == null) {
           mapGovernanceError(err, this, i);
-          throw err;
+          throw new NodeOperationError(this.getNode(), err as Error, { itemIndex: i });
         }
         // non-fatal when we already have a loopError
       }
 
       // Re-throw loop error AFTER afterAgent has fired
       if (loopError != null) {
+        const nodeErr = new NodeOperationError(this.getNode(), loopError as Error, { itemIndex: i });
+        if (continueOnFail) {
+          output.push({ json: { error: nodeErr.message }, pairedItem: { item: i } });
+          continue;
+        }
         mapGovernanceError(loopError, this, i);
-        throw loopError as Error;
+        throw nodeErr;
       }
 
       // Apply output redaction from WorkflowCompleted guardrails to the node's

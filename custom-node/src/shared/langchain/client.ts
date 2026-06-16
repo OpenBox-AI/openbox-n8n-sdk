@@ -1,3 +1,4 @@
+/* eslint-disable no-console, @n8n/community-nodes/require-node-api-error */
 /**
  * GovernanceClient — TypeScript port of openbox_langgraph/client.py.
  *

@@ -1,3 +1,4 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 /**
  * Hook handler functions — TypeScript port of middleware_hook_handlers.py.
  *

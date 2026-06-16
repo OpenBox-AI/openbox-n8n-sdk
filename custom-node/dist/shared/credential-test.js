@@ -20,7 +20,10 @@ async function testOpenBoxCredential(credential) {
     const path = '/api/v1/auth/validate';
     const headers = (0, signing_1.buildSignedHeaders)('GET', path, Buffer.alloc(0), creds.apiKey, creds.agentDid, creds.agentPrivateKey);
     try {
-        await this.helpers.request({
+        // n8n-workflow 1.x types don't declare httpRequest on ICredentialTestFunctions,
+        // but the runtime exposes it (the linter rule explicitly requires it).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await this.helpers.httpRequest({
             method: 'GET',
             url: `${creds.openboxUrl}${path}`,
             headers,

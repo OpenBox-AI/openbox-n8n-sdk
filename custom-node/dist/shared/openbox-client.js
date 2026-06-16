@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SoftGovernanceError = void 0;
 exports.getOpenBoxCredentials = getOpenBoxCredentials;
 exports.openboxRequest = openboxRequest;
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 const n8n_workflow_1 = require("n8n-workflow");
 const OpenBoxApi_credentials_1 = require("../credentials/OpenBoxApi.credentials");
 const signing_1 = require("./signing");

@@ -1,3 +1,4 @@
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 /**
  * HTTP span collector — TypeScript port of otel_setup.py + http_governance_hooks.py +
  * the relevant parts of WorkflowSpanProcessor, scoped to n8n.
