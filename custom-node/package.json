@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-openbox-hook",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "OpenBox governance community node for n8n",
   "license": "MIT",
   "author": {
@@ -13,7 +13,9 @@
     "url": "git+https://github.com/OpenBox-AI/openbox-n8n-sdk.git",
     "directory": "custom-node"
   },
-  "bugs": { "url": "https://github.com/OpenBox-AI/openbox-n8n-sdk/issues" },
+  "bugs": {
+    "url": "https://github.com/OpenBox-AI/openbox-n8n-sdk/issues"
+  },
   "keywords": [
     "n8n-community-node-package",
     "n8n",
@@ -24,7 +26,10 @@
     "langchain"
   ],
   "main": "dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js",
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "clean": "node scripts/clean-dist.js",
     "prebuild": "npm run clean",
@@ -50,8 +55,12 @@
   },
   "n8n": {
     "n8nNodesApiVersion": 1,
-    "credentials": ["dist/credentials/OpenBoxApi.credentials.js"],
-    "nodes": ["dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js"],
+    "credentials": [
+      "dist/credentials/OpenBoxApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/OpenBoxAgent/OpenBoxAgent.node.js"
+    ],
     "strict": false
   }
 }
