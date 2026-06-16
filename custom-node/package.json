@@ -4,14 +4,14 @@
   "description": "OpenBox governance community node for n8n",
   "license": "MIT",
   "author": "OpenBox AI",
-  "homepage": "https://github.com/OpenBox-AI/openbox-sdk/tree/main/example/n8n/custom-node#readme",
+  "homepage": "https://github.com/OpenBox-AI/openbox-n8n-sdk/tree/main/custom-node#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OpenBox-AI/openbox-sdk.git",
-    "directory": "example/n8n/custom-node"
+    "url": "git+https://github.com/OpenBox-AI/openbox-n8n-sdk.git",
+    "directory": "custom-node"
   },
   "bugs": {
-    "url": "https://github.com/OpenBox-AI/openbox-sdk/issues"
+    "url": "https://github.com/OpenBox-AI/openbox-n8n-sdk/issues"
   },
   "keywords": [
     "n8n-community-node-package",
