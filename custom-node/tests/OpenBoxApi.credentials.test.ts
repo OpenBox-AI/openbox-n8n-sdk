@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeOpenBoxCredentials,
   OpenBoxApi,
-} from '../src/credentials/OpenBoxApi.credentials';
+} from '../credentials/OpenBoxApi.credentials';
 
 describe('OpenBoxApi credential descriptor', () => {
   const cred = new OpenBoxApi();

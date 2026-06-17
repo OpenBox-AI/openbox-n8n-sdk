@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { mergeConfig } from '../src/shared/langchain/config';
-import { handleBeforeAgent, handleWrapModelCall } from '../src/shared/langchain/hook_handlers';
-import { handleWrapToolCall } from '../src/shared/langchain/tool_hook';
-import { enforceVerdict, verdictFromString } from '../src/shared/langchain/verdict';
+import { mergeConfig } from '../shared/langchain/config';
+import { handleBeforeAgent, handleWrapModelCall } from '../shared/langchain/hook_handlers';
+import { handleWrapToolCall } from '../shared/langchain/tool_hook';
+import { enforceVerdict, verdictFromString } from '../shared/langchain/verdict';
 
 function makeMiddleware() {
   return {
