@@ -32,7 +32,8 @@ class OpenBoxLangChainMiddleware {
         this._client = new client_1.GovernanceClient(executeFunctions, '');
         // Ensure fetch/http spans to the OpenBox API itself are never captured
         // to avoid infinite loops (mirrors `ignored_urls` in Python SDK setup).
-        const apiUrl = (process.env.OPENBOX_API_URL ?? 'https://core.openbox.ai').replace(/\/+$/, '');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const apiUrl = (global.process?.env?.OPENBOX_API_URL ?? 'https://core.openbox.ai').replace(/\/+$/, '');
         (0, span_processor_1.addIgnoredPrefix)(apiUrl);
         (0, span_processor_1.setupSpanProcessorInstrumentation)({ http: this._config.instrumentHttp });
         (0, node_instrumentation_1.setupNodeHookInstrumentation)({

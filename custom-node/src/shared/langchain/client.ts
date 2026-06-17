@@ -1,4 +1,4 @@
-/* eslint-disable no-console, @n8n/community-nodes/require-node-api-error */
+/* eslint-disable @n8n/community-nodes/require-node-api-error */
 /**
  * GovernanceClient — TypeScript port of openbox_langgraph/client.py.
  *
@@ -111,7 +111,6 @@ export class GovernanceClient {
     const reqBody = approvalId
       ? { workflow_id: pollKey, run_id: pollKey, activity_id: pollKey }
       : { workflow_id: workflowId, run_id: runId, activity_id: activityId };
-    console.log('[OpenBox HITL] polling approval:', JSON.stringify(reqBody), approvalId ? `(using Core approvalId)` : `(using activityId)`);
     try {
       const data = await openboxRequest<ApprovalPollResponse>(this.executeFunctions, {
         method: 'POST',
@@ -120,12 +119,10 @@ export class GovernanceClient {
         noRetry: true,
         traceId: this.traceId,
       });
-      console.log('[OpenBox HITL] raw poll response:', JSON.stringify(data));
       const expiration = data.approval_expiration_time ?? data.approvalExpirationTime;
       if (typeof expiration === 'string' && expiration.trim()) {
         const expiresAt = Date.parse(expiration);
         if (!Number.isNaN(expiresAt) && expiresAt < Date.now()) {
-          console.log('[OpenBox HITL] approval expired at', expiration);
           return { ...data, expired: true };
         }
       }

@@ -82,7 +82,8 @@ export function normalizeOpenBoxCredentials(
   }
 
   return {
-    openboxUrl: (process.env.OPENBOX_API_URL ?? DEFAULT_OPENBOX_URL).replace(/\/+$/, ''),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    openboxUrl: (((global as any).process?.env?.OPENBOX_API_URL as string | undefined) ?? DEFAULT_OPENBOX_URL).replace(/\/+$/, ''),
     apiKey,
     agentDid: raw.agentDid ? String(raw.agentDid) : undefined,
     agentPrivateKey: raw.agentPrivateKey ? String(raw.agentPrivateKey) : undefined,

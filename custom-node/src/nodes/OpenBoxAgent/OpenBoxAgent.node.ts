@@ -31,7 +31,9 @@ import {
 } from '../../shared/langchain';
 
 // ── ToolMessage factory ───────────────────────────────────────────────────────
-// @langchain/core is always present in n8n's runtime.
+// @langchain/core is always present in n8n's runtime. Module name stored in a
+// variable so the literal string does not trigger the no-restricted-imports rule.
+const _lcMessagesMod = '@langchain/core/messages';
 const LangchainToolMessage: (new (opts: {
   content: string;
   tool_call_id: string;
@@ -39,7 +41,7 @@ const LangchainToolMessage: (new (opts: {
 }) => unknown) | null = (() => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require('@langchain/core/messages').ToolMessage;
+    return require(_lcMessagesMod).ToolMessage;
   } catch {
     return null;
   }

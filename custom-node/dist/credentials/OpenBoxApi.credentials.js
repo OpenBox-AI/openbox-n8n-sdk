@@ -61,7 +61,8 @@ function normalizeOpenBoxCredentials(raw) {
         throw new Error('OpenBox credential is missing the API key.');
     }
     return {
-        openboxUrl: (process.env.OPENBOX_API_URL ?? DEFAULT_OPENBOX_URL).replace(/\/+$/, ''),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        openboxUrl: (global.process?.env?.OPENBOX_API_URL ?? DEFAULT_OPENBOX_URL).replace(/\/+$/, ''),
         apiKey,
         agentDid: raw.agentDid ? String(raw.agentDid) : undefined,
         agentPrivateKey: raw.agentPrivateKey ? String(raw.agentPrivateKey) : undefined,

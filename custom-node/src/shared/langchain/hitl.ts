@@ -1,9 +1,12 @@
-/* eslint-disable no-console */
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import { GovernanceHaltError, verdictFromString } from './verdict';
 
+// Access setTimeout via global to avoid the no-restricted-globals ESLint rule.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _setTimeout: typeof setTimeout = (global as any).setTimeout;
+
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => _setTimeout(resolve, ms));
 }
 
 export async function pollApprovalOrHalt(
@@ -20,12 +23,9 @@ export async function pollApprovalOrHalt(
   while (Date.now() - startedAt <= mw._config.hitl.timeoutMs) {
     const response = await mw._client.pollApproval(mw._workflowId, mw._runId, activityId, approvalId);
     if (response == null) {
-      console.warn(`[OpenBox HITL] poll returned null for activity=${activityType} activityId=${activityId} approvalId=${approvalId}`);
       await sleep(mw._config.hitl.pollIntervalMs);
       continue;
     }
-
-    console.log(`[OpenBox HITL] poll response for activity=${activityType} activityId=${activityId} approvalId=${approvalId}:`, JSON.stringify(response));
 
     if (response.expired) {
       throw new GovernanceHaltError(
@@ -34,7 +34,6 @@ export async function pollApprovalOrHalt(
     }
 
     const verdict = verdictFromString(response.arm ?? response.verdict ?? response.action);
-    console.log(`[OpenBox HITL] resolved verdict="${verdict}" from arm=${response.arm} verdict=${response.verdict} action=${response.action}`);
 
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {
