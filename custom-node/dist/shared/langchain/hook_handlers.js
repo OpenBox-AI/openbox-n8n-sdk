@@ -244,14 +244,29 @@ async function handleWrapMemoryOp(mw, opType, fn) {
         activity_id: activityId,
         activity_type: opType,
     }, mw._client.executeFunctions, mw._workflowId);
+    // Capture result so ActivityCompleted can include activity_output.
+    // The Python SDK (activity_interceptor._send_activity_event) uses the same
+    // activity_id for both ActivityStarted and ActivityCompleted. Core matches
+    // completions to their starts by activity_id; a different id (e.g. '-c' suffix)
+    // produces an orphan that Core discards — the dashboard shows "started, never ended".
+    // When fn() throws (e.g. Postgres error), the Python SDK never calls
+    // _handle_completion (Temporal runtime tracks the failure). In n8n we have no
+    // runtime, so we always send ActivityCompleted from finally — with the correct id.
     let status = 'completed';
-    let errorMsg;
+    // error as dict mirrors WorkflowFailed payload in workflow_interceptor.py:
+    // {"type": type(e).__name__, "message": str(e)}
+    let errorInfo;
+    let result;
     try {
-        return await (0, span_processor_1.runWithActivity)(activityId, fn);
+        result = await (0, span_processor_1.runWithActivity)(activityId, fn);
+        return result;
     }
     catch (err) {
         status = 'failed';
-        errorMsg = String(err);
+        errorInfo = {
+            type: err instanceof Error ? (err.constructor?.name || 'Error') : 'Error',
+            message: err instanceof Error ? err.message : String(err),
+        };
         throw err;
     }
     finally {
@@ -259,13 +274,19 @@ async function handleWrapMemoryOp(mw, opType, fn) {
         const completedEvent = {
             ...(0, hooks_1.baseEventFields)(mw),
             event_type: 'ActivityCompleted',
-            activity_id: `${activityId}-c`,
+            // Same id as ActivityStarted — mirrors Python SDK's info.activity_id pattern.
+            // Core matches completions to starts by activity_id; a '-c' suffix produces
+            // an orphan event that Core cannot correlate and silently discards.
+            activity_id: activityId,
             activity_type: opType,
             status,
             duration_ms: Date.now() - startMs,
+            activity_output: status === 'completed' ? (0, types_1.safeSerialize)(result) : null,
+            spans: [],
+            span_count: 0,
         };
-        if (errorMsg)
-            completedEvent.error = errorMsg;
+        if (errorInfo)
+            completedEvent.error = errorInfo;
         // Await ActivityCompleted so it arrives at Core before the caller proceeds
         // to the next lifecycle event (e.g. LLMStarted). Matches Python SDK's
         // sequential await pattern — all events must be strictly ordered by arrival.

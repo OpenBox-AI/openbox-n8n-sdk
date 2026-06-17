@@ -112,28 +112,27 @@ async function handleWrapToolCall(mw, toolName, toolArgs, handler) {
         const serializedOutput = typeof toolResult === 'string'
             ? (0, types_1.safeSerialize)({ result: toolResult })
             : (0, types_1.safeSerialize)(toolResult);
-        // Skip evaluate entirely when already approved — sending ToolCompleted to Core
-        // would trigger the same policy again and create a spurious approval request on
-        // the dashboard. The ToolStarted approval already covers the full tool call.
+        // Always send ToolCompleted so Core can show the completion on the dashboard.
+        // When wasApproved=true (ToolStarted already required+received human approval),
+        // send the event but skip verdict enforcement — enforcing it would trigger a
+        // second governance evaluation and create a spurious approval row on Core.
         // Use wasApproved (captured before finally) because unregisterActivity already
         // cleared _approvedActivities by the time we reach here.
-        if (!wasApproved) {
-            const resp = await (0, hooks_1.evaluate)(mw, {
-                ...(0, hooks_1.baseEventFields)(mw),
-                event_type: 'ToolCompleted',
-                activity_id: `${activityId}-c`,
-                activity_type: toolName,
-                activity_output: serializedOutput,
-                tool_name: toolName,
-                tool_type: toolType,
-                status: 'completed',
-                duration_ms,
-            });
-            if (resp != null) {
-                const result = (0, verdict_1.enforceVerdict)(resp, 'tool_end');
-                if (result.requiresHitl) {
-                    await (0, hitl_1.pollApprovalOrHalt)(mw, `${activityId}-c`, toolName, result.approvalId);
-                }
+        const resp = await (0, hooks_1.evaluate)(mw, {
+            ...(0, hooks_1.baseEventFields)(mw),
+            event_type: 'ToolCompleted',
+            activity_id: `${activityId}-c`,
+            activity_type: toolName,
+            activity_output: serializedOutput,
+            tool_name: toolName,
+            tool_type: toolType,
+            status: 'completed',
+            duration_ms,
+        });
+        if (resp != null && !wasApproved) {
+            const result = (0, verdict_1.enforceVerdict)(resp, 'tool_end');
+            if (result.requiresHitl) {
+                await (0, hitl_1.pollApprovalOrHalt)(mw, `${activityId}-c`, toolName, result.approvalId);
             }
         }
     }

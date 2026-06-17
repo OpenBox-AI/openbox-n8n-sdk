@@ -139,29 +139,28 @@ export async function handleWrapToolCall(
         ? safeSerialize({ result: toolResult })
         : safeSerialize(toolResult);
 
-    // Skip evaluate entirely when already approved — sending ToolCompleted to Core
-    // would trigger the same policy again and create a spurious approval request on
-    // the dashboard. The ToolStarted approval already covers the full tool call.
+    // Always send ToolCompleted so Core can show the completion on the dashboard.
+    // When wasApproved=true (ToolStarted already required+received human approval),
+    // send the event but skip verdict enforcement — enforcing it would trigger a
+    // second governance evaluation and create a spurious approval row on Core.
     // Use wasApproved (captured before finally) because unregisterActivity already
     // cleared _approvedActivities by the time we reach here.
-    if (!wasApproved) {
-      const resp = await evaluate(mw, {
-        ...baseEventFields(mw),
-        event_type: 'ToolCompleted',
-        activity_id: `${activityId}-c`,
-        activity_type: toolName,
-        activity_output: serializedOutput,
-        tool_name: toolName,
-        tool_type: toolType,
-        status: 'completed',
-        duration_ms,
-      } as LangChainGovernanceEvent);
+    const resp = await evaluate(mw, {
+      ...baseEventFields(mw),
+      event_type: 'ToolCompleted',
+      activity_id: `${activityId}-c`,
+      activity_type: toolName,
+      activity_output: serializedOutput,
+      tool_name: toolName,
+      tool_type: toolType,
+      status: 'completed',
+      duration_ms,
+    } as LangChainGovernanceEvent);
 
-      if (resp != null) {
-        const result = enforceVerdict(resp, 'tool_end');
-        if (result.requiresHitl) {
-          await pollApprovalOrHalt(mw, `${activityId}-c`, toolName, result.approvalId);
-        }
+    if (resp != null && !wasApproved) {
+      const result = enforceVerdict(resp, 'tool_end');
+      if (result.requiresHitl) {
+        await pollApprovalOrHalt(mw, `${activityId}-c`, toolName, result.approvalId);
       }
     }
   }
