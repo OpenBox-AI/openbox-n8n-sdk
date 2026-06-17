@@ -139,7 +139,6 @@ class OpenBoxAgent {
         ],
         outputs: [n8n_workflow_1.NodeConnectionTypes.Main],
         credentials: [
-            // eslint-disable-next-line @n8n/community-nodes/no-credential-reuse
             { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
         ],
         properties: [
@@ -155,7 +154,7 @@ class OpenBoxAgent {
                         description: "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
                     },
                     {
-                        name: 'Define below',
+                        name: 'Define Below',
                         value: 'define',
                         description: 'Use an expression to reference data in previous nodes or enter static text',
                     },

@@ -151,7 +151,6 @@ export class OpenBoxAgent implements INodeType {
     ] as unknown as INodeTypeDescription['inputs'],
     outputs: [NodeConnectionTypes.Main] as unknown as INodeTypeDescription['outputs'],
     credentials: [
-      // eslint-disable-next-line @n8n/community-nodes/no-credential-reuse
       { name: 'openBoxApi', required: false, testedBy: 'openBoxApiCredentialTest' },
     ],
     properties: [
@@ -168,7 +167,7 @@ export class OpenBoxAgent implements INodeType {
               "Looks for an input field called 'chatInput' that is coming from a directly connected Chat Trigger",
           },
           {
-            name: 'Define below',
+            name: 'Define Below',
             value: 'define',
             description:
               'Use an expression to reference data in previous nodes or enter static text',

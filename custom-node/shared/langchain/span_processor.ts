@@ -24,7 +24,7 @@ import { IExecuteFunctions } from 'n8n-workflow';
 
 // Load AsyncLocalStorage via a variable to avoid the static 'node:async_hooks'
 // import restriction in n8n community-node ESLint rules.
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { AsyncLocalStorage } = require('async_hooks') as typeof import('async_hooks');
 
 import { openboxRequest } from '../openbox-client';

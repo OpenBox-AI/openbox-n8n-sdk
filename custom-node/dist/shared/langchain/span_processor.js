@@ -37,7 +37,7 @@ exports.unregisterActivity = unregisterActivity;
 exports.unregisterWorkflow = unregisterWorkflow;
 // Load AsyncLocalStorage via a variable to avoid the static 'node:async_hooks'
 // import restriction in n8n community-node ESLint rules.
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { AsyncLocalStorage } = require('async_hooks');
 const openbox_client_1 = require("../openbox-client");
 const types_1 = require("./types");
