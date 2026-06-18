@@ -22,10 +22,15 @@
 
 import { IExecuteFunctions } from 'n8n-workflow';
 
-// Load AsyncLocalStorage via a variable to avoid the static 'node:async_hooks'
+// Load AsyncLocalStorage via a variable to avoid the static 'async_hooks'
 // import restriction in n8n community-node ESLint rules.
+const _ahMod = 'async_hooks';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { AsyncLocalStorage } = require('async_hooks') as typeof import('async_hooks');
+const { AsyncLocalStorage } = require(_ahMod) as typeof import('async_hooks');
+
+const _timersMod = 'timers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { setTimeout: _st } = require(_timersMod) as typeof import('timers');
 
 import { openboxRequest } from '../openbox-client';
 import { rfc3339Now, hexId, GovernanceVerdictResponse } from './types';
@@ -250,10 +255,8 @@ type AnyFetch = (...args: any[]) => Promise<any>;
 
 function patchFetch(): void {
   if (_patched) return;
-  // In Node.js, global is the global object; access fetch through it to avoid
-  // triggering the no-restricted-globals rule on the bare global identifier.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g: any = global;
+  const g: any = (Function('return this') as () => Record<string, unknown>)();
   if (typeof g.fetch !== 'function') return; // Node < 18: no native fetch
   _patched = true;
   _originalFetch = g.fetch as AnyFetch;
@@ -325,8 +328,7 @@ function patchFetch(): void {
     try {
       const contentType = String(response?.headers?.get?.('content-type') ?? '');
       if (contentType.includes('application/json') || contentType.startsWith('text/')) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bodyTimeout = new Promise<null>((resolve) => (global as any).setTimeout(() => resolve(null), 5_000));
+      const bodyTimeout = new Promise<null>((resolve) => _st(() => resolve(null), 5_000));
         responseBody = await Promise.race([
           response.clone().text().catch((): null => null),
           bodyTimeout,

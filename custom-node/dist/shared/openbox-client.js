@@ -16,23 +16,12 @@ async function getOpenBoxCredentials(ctx) {
         }
     }
     catch {
-        // Credential not attached — fall through to env-var path
+        // fall through
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const _env = global.process?.env ?? {};
-    const envKey = _env.OPENBOX_API_KEY ?? '';
-    if (!envKey) {
-        throw new n8n_workflow_1.NodeApiError(ctx.getNode(), {
-            message: 'OpenBox API key not set',
-            description: 'Attach an OpenBox credential to this node, or set OPENBOX_API_KEY in the environment.',
-        });
-    }
-    return {
-        openboxUrl: (_env.OPENBOX_API_URL ?? 'https://core.openbox.ai').replace(/\/+$/, ''),
-        apiKey: envKey,
-        agentDid: _env.OPENBOX_AGENT_DID || undefined,
-        agentPrivateKey: _env.OPENBOX_AGENT_PRIVATE_KEY || undefined,
-    };
+    throw new n8n_workflow_1.NodeApiError(ctx.getNode(), {
+        message: 'OpenBox API key not set',
+        description: 'Attach an OpenBox credential to this node.',
+    });
 }
 async function openboxRequest(ctx, options) {
     const credentials = await getOpenBoxCredentials(ctx);

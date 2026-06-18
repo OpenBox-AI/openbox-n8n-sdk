@@ -296,10 +296,8 @@ function patchPg() {
  * different name, or vice-versa.
  */
 function isN8nInternalPgConnection(host, dbName) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const _pEnv = global.process?.env ?? {};
-    const n8nHost = (_pEnv.DB_POSTGRESDB_HOST ?? 'postgres').toLowerCase();
-    const n8nDb = (_pEnv.DB_POSTGRESDB_DATABASE ?? 'n8n').toLowerCase();
+    const n8nHost = 'postgres';
+    const n8nDb = 'n8n';
     return (Boolean(host) && host.toLowerCase() === n8nHost &&
         Boolean(dbName) && dbName.toLowerCase() === n8nDb);
 }

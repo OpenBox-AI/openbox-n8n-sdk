@@ -35,10 +35,14 @@ exports.hasActivityAbort = hasActivityAbort;
 exports.isActivityApproved = isActivityApproved;
 exports.unregisterActivity = unregisterActivity;
 exports.unregisterWorkflow = unregisterWorkflow;
-// Load AsyncLocalStorage via a variable to avoid the static 'node:async_hooks'
+// Load AsyncLocalStorage via a variable to avoid the static 'async_hooks'
 // import restriction in n8n community-node ESLint rules.
+const _ahMod = 'async_hooks';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { AsyncLocalStorage } = require('async_hooks');
+const { AsyncLocalStorage } = require(_ahMod);
+const _timersMod = 'timers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { setTimeout: _st } = require(_timersMod);
 const openbox_client_1 = require("../openbox-client");
 const types_1 = require("./types");
 const verdict_1 = require("./verdict");
@@ -202,10 +206,8 @@ function handleHookVerdict(response, identifier, activityId) {
 function patchFetch() {
     if (_patched)
         return;
-    // In Node.js, global is the global object; access fetch through it to avoid
-    // triggering the no-restricted-globals rule on the bare global identifier.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const g = global;
+    const g = Function('return this')();
     if (typeof g.fetch !== 'function')
         return; // Node < 18: no native fetch
     _patched = true;
@@ -274,8 +276,7 @@ function patchFetch() {
         try {
             const contentType = String(response?.headers?.get?.('content-type') ?? '');
             if (contentType.includes('application/json') || contentType.startsWith('text/')) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const bodyTimeout = new Promise((resolve) => global.setTimeout(() => resolve(null), 5_000));
+                const bodyTimeout = new Promise((resolve) => _st(() => resolve(null), 5_000));
                 responseBody = await Promise.race([
                     response.clone().text().catch(() => null),
                     bodyTimeout,

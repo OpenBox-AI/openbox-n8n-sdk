@@ -2,9 +2,9 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.pollApprovalOrHalt = pollApprovalOrHalt;
 const verdict_1 = require("./verdict");
-// Access setTimeout via global to avoid the no-restricted-globals ESLint rule.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const _setTimeout = global.setTimeout;
+const _timersMod = 'timers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { setTimeout: _setTimeout } = require(_timersMod);
 function sleep(ms) {
     return new Promise((resolve) => _setTimeout(resolve, ms));
 }

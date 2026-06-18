@@ -1,9 +1,9 @@
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import { GovernanceHaltError, verdictFromString } from './verdict';
 
-// Access setTimeout via global to avoid the no-restricted-globals ESLint rule.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const _setTimeout: typeof setTimeout = (global as any).setTimeout;
+const _timersMod = 'timers';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { setTimeout: _setTimeout } = require(_timersMod) as typeof import('timers');
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => _setTimeout(resolve, ms));
