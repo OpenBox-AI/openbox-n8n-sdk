@@ -354,8 +354,8 @@ function isN8nInternalPgConnection(
   host: string | null | undefined,
   dbName: string | null | undefined,
 ): boolean {
-  const n8nHost = 'postgres';
-  const n8nDb = 'n8n';
+  const n8nHost = (process.env.DB_POSTGRESDB_HOST || 'postgres').toLowerCase();
+  const n8nDb = (process.env.DB_POSTGRESDB_DATABASE || 'n8n').toLowerCase();
   return (
     Boolean(host)   && host!.toLowerCase()   === n8nHost &&
     Boolean(dbName) && dbName!.toLowerCase() === n8nDb
@@ -542,7 +542,7 @@ function patchMongoExports(mongodb: Record<string, unknown>): boolean {
   for (const method of ['find', 'findOne', 'insertOne', 'updateOne', 'deleteOne', 'aggregate']) {
     const original = proto[method];
     if (typeof original !== 'function') continue;
-    proto[method] = function patchedMongoOperation(filter: unknown, ...args: unknown[]) {
+    proto[method] = function patchedMongoOperation(filter: unknown, ...isN8nInternalPgConnectionargs: unknown[]) {
       const self = this as {
         collectionName?: string;
         namespace?: string;
@@ -700,7 +700,8 @@ export function setupNodeHookInstrumentation(options: NodeInstrumentationOptions
     }
   }
 
-  if (options.databases ?? true) {
+  const databasesEnabledByEnv = process.env.OPENBOX_INSTRUMENT_DATABASES !== 'false';
+  if ((options.databases ?? true) && databasesEnabledByEnv) {
     patchDatabaseModuleLoader();
     patchPg();
     patchMysql2();

@@ -296,8 +296,8 @@ function patchPg() {
  * different name, or vice-versa.
  */
 function isN8nInternalPgConnection(host, dbName) {
-    const n8nHost = 'postgres';
-    const n8nDb = 'n8n';
+    const n8nHost = (process.env.DB_POSTGRESDB_HOST || 'postgres').toLowerCase();
+    const n8nDb = (process.env.DB_POSTGRESDB_DATABASE || 'n8n').toLowerCase();
     return (Boolean(host) && host.toLowerCase() === n8nHost &&
         Boolean(dbName) && dbName.toLowerCase() === n8nDb);
 }
@@ -621,7 +621,8 @@ function setupNodeHookInstrumentation(options = {}) {
             // optional instrumentation
         }
     }
-    if (options.databases ?? true) {
+    const databasesEnabledByEnv = process.env.OPENBOX_INSTRUMENT_DATABASES !== 'false';
+    if ((options.databases ?? true) && databasesEnabledByEnv) {
         patchDatabaseModuleLoader();
         patchPg();
         patchMysql2();
