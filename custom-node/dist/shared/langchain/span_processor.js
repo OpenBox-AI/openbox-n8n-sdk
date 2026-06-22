@@ -237,8 +237,7 @@ function handleHookVerdict(response, identifier, activityId) {
 function patchFetch() {
     if (_patched)
         return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const g = Function('return this')();
+    const g = globalThis;
     if (typeof g.fetch !== 'function')
         return; // Node < 18: no native fetch
     _patched = true;

@@ -286,8 +286,7 @@ type AnyFetch = (...args: any[]) => Promise<any>;
 
 function patchFetch(): void {
   if (_patched) return;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g: any = (Function('return this') as () => Record<string, unknown>)();
+  const g = globalThis as Record<string, unknown>;
   if (typeof g.fetch !== 'function') return; // Node < 18: no native fetch
   _patched = true;
   _originalFetch = g.fetch as AnyFetch;

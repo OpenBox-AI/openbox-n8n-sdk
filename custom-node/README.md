@@ -2,59 +2,78 @@
 
 OpenBox governance community node for n8n.
 
-This package provides an **OpenBox: Agent** node that wraps n8n LangChain chat models, memory, and tools with OpenBox governance checks.
+This package provides an **OpenBox: Agent** node that wraps n8n LangChain chat models, memory, and tools with OpenBox governance — policy evaluation, PII redaction, HITL approval, and audit traces — without changing your existing workflow structure.
 
-## Install in n8n
+## Install
 
 In n8n, open **Settings > Community Nodes**, choose **Install**, and enter:
 
-```text
+```
 n8n-nodes-openbox-hook
 ```
 
-Then restart n8n if your deployment requires it.
+Restart n8n if prompted.
 
 ## Credentials
 
 Create an **OpenBox API** credential in n8n with:
 
-- **OpenBox URL**: your OpenBox API URL
-- **API Key**: your OpenBox API key
-- Optional webhook signing secret, if you use signed OpenBox webhooks
+| Field | Required | Description |
+|---|---|---|
+| **API Key** | Yes | Your OpenBox API key. Live keys start with `obx_live_`; test keys with `obx_test_`. |
+| **Agent DID** | No | Agent decentralised identifier (`did:aip:<uuid>`). Required only for agents with `signing_required = true`. |
+| **Agent Private Key** | No | Base64-encoded raw 32-byte Ed25519 seed. Paired with Agent DID for signed requests. |
 
-You can also use `OPENBOX_API_URL` and `OPENBOX_API_KEY` environment variables in deployments where credentials are injected at runtime.
+Get your API key from [dashboard.openbox.ai](https://dashboard.openbox.ai).
+
+## Usage
+
+### Basic setup
+
+1. Add an **OpenBox: Agent** node to your workflow.
+2. Connect a **Chat Model** sub-node (e.g. OpenAI Chat Model, Anthropic Chat Model) to the **Chat Model** input.
+3. Optionally connect **Memory** and **Tool** sub-nodes.
+4. Attach your **OpenBox API** credential to the node.
+5. Configure the **Agent Name** (used to identify this agent in OpenBox governance traces) and the **Task Queue**.
+
+The node exposes the same inputs and outputs as the standard n8n AI Agent node, so it is a drop-in replacement.
+
+### Example workflow
+
+```
+[Chat Trigger]
+      │
+      ▼
+[OpenBox: Agent]  ←──  [OpenAI Chat Model]
+      │            ←──  [Window Buffer Memory]
+      │            ←──  [Calculator Tool]
+      ▼
+[Set node / downstream steps]
+```
+
+**OpenBox: Agent node settings:**
+
+- **Agent Name**: `customer-support-bot`
+- **Task Queue**: `n8n`
+- **Governance**: Enabled (default)
+
+When the agent runs, OpenBox evaluates each LLM call and tool invocation against your configured policies. If a call requires approval (HITL), the node pauses and polls until a decision is received.
+
+### Advanced: Agent DID signing
+
+For agents configured with `signing_required = true` in OpenBox, fill in the **Agent DID** and **Agent Private Key** fields in the credential. Every request to the OpenBox API will be signed with an Ed25519 signature automatically.
 
 ## Local development
-
-From this directory:
 
 ```bash
 npm install
 npm run build
 npm test
-npm run smoke:load
+npm run lint
 ```
 
-To test the package tarball locally:
+To verify the package scan passes before publishing:
 
 ```bash
-npm pack
+npx @n8n/scan-community-package n8n-nodes-openbox-hook
 ```
-
-Install the generated `.tgz` through n8n's custom/community node mechanism, or mount this package into an n8n container for development.
-
-## Publish
-
-Before publishing, verify the package contents:
-
-```bash
-npm pack --dry-run
-```
-
-Publish to npm:
-
-```bash
-npm publish --access public
-```
-
-The package name starts with `n8n-nodes-` and includes the `n8n-community-node-package` keyword so n8n can recognize it as a community node package.
