@@ -296,19 +296,10 @@ function patchPg() {
  * different name, or vice-versa.
  */
 function isN8nInternalPgConnection(host, dbName) {
-    if (!host || !dbName)
-        return false;
-    const h = host.toLowerCase();
-    const db = dbName.toLowerCase();
-    if (db !== 'n8n')
-        return false;
-    // Docker Compose default hostname
-    if (h === 'postgres')
-        return true;
-    // Kubernetes: n8n-postgresql[-hl][.<namespace>].svc.cluster.local
-    if (h.startsWith('n8n-postgresql'))
-        return true;
-    return false;
+    const n8nHost = (process.env.DB_POSTGRESDB_HOST || 'postgres').toLowerCase();
+    const n8nDb = (process.env.DB_POSTGRESDB_DATABASE || 'n8n').toLowerCase();
+    return (Boolean(host) && host.toLowerCase() === n8nHost &&
+        Boolean(dbName) && dbName.toLowerCase() === n8nDb);
 }
 function patchPgExports(pg) {
     try {
@@ -630,7 +621,8 @@ function setupNodeHookInstrumentation(options = {}) {
             // optional instrumentation
         }
     }
-    if (options.databases ?? true) {
+    const databasesEnabledByEnv = process.env.OPENBOX_INSTRUMENT_DATABASES !== 'false';
+    if ((options.databases ?? true) && databasesEnabledByEnv) {
         patchDatabaseModuleLoader();
         patchPg();
         patchMysql2();
