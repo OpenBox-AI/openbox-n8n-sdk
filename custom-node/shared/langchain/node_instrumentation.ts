@@ -354,12 +354,15 @@ function isN8nInternalPgConnection(
   host: string | null | undefined,
   dbName: string | null | undefined,
 ): boolean {
-  const n8nHost = 'postgres';
-  const n8nDb = 'n8n';
-  return (
-    Boolean(host)   && host!.toLowerCase()   === n8nHost &&
-    Boolean(dbName) && dbName!.toLowerCase() === n8nDb
-  );
+  if (!host || !dbName) return false;
+  const h = host.toLowerCase();
+  const db = dbName.toLowerCase();
+  if (db !== 'n8n') return false;
+  // Docker Compose default hostname
+  if (h === 'postgres') return true;
+  // Kubernetes: n8n-postgresql[-hl][.<namespace>].svc.cluster.local
+  if (h.startsWith('n8n-postgresql')) return true;
+  return false;
 }
 
 function patchPgExports(pg: Record<string, unknown>): boolean {
