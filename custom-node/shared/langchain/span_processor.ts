@@ -93,6 +93,34 @@ export function shouldIgnore(url: string): boolean {
   return _ignoredPrefixes.some((p) => url.startsWith(p));
 }
 
+// ── LLM provider detection (gen_ai.system per OTel semantic conventions) ────
+
+const LLM_PROVIDERS: Array<{ host: string; system: string }> = [
+  { host: 'api.openai.com',                      system: 'openai' },
+  { host: 'api.anthropic.com',                   system: 'anthropic' },
+  { host: 'generativelanguage.googleapis.com',   system: 'google' },
+  { host: 'openrouter.ai',                       system: 'openrouter' },
+  { host: 'api.mistral.ai',                      system: 'mistral' },
+  { host: 'api.groq.com',                        system: 'groq' },
+  { host: 'api.together.xyz',                    system: 'together' },
+  { host: 'api.together.ai',                     system: 'together' },
+  { host: 'api.cohere.com',                      system: 'cohere' },
+];
+
+function detectGenAiSystem(url: string): string | null {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    // Azure OpenAI: <resource>.openai.azure.com
+    if (hostname.endsWith('.openai.azure.com')) return 'azure_openai';
+    // AWS Bedrock: bedrock-runtime.<region>.amazonaws.com
+    if (hostname.includes('bedrock') && hostname.endsWith('.amazonaws.com')) return 'aws_bedrock';
+    const match = LLM_PROVIDERS.find((p) => hostname === p.host || hostname.endsWith(`.${p.host}`));
+    return match?.system ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Span builder (mirrors _build_http_span_data in http_governance_hooks.py) ───
 
 export function buildHttpSpanData(opts: {
@@ -120,6 +148,7 @@ export function buildHttpSpanData(opts: {
 
   // start_time: for "completed" spans use end timestamp (mirrors Python SDK §5.6)
   const spanStartNs = opts.stage === 'completed' ? (endNs ?? startNs) : startNs;
+  const genAiSystem = detectGenAiSystem(opts.url);
 
   return {
     span_id: hexId(16),
@@ -134,12 +163,14 @@ export function buildHttpSpanData(opts: {
     attributes: {
       'http.method': opts.method,
       'http.url': opts.url,
+      ...(genAiSystem != null ? { 'gen_ai.system': genAiSystem } : {}),
     },
     status: { code: error ? 'ERROR' : 'UNSET', description: error },
     events: [],
     hook_type: 'http_request',
     http_method: opts.method,
     http_url: opts.url,
+    gen_ai_system: genAiSystem,
     request_body: opts.requestBody,
     request_headers: null,
     response_body: opts.responseBody,
