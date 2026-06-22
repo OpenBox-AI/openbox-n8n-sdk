@@ -1,10 +1,13 @@
 import {
-  IAuthenticateGeneric,
+  IAuthenticate,
   ICredentialDataDecryptedObject,
   ICredentialTestRequest,
   ICredentialType,
+  IHttpRequestOptions,
   INodeProperties,
 } from 'n8n-workflow';
+
+import { buildSignedHeaders } from '../shared/signing';
 
 const DEFAULT_OPENBOX_URL = 'https://core.openbox.ai';
 
@@ -53,16 +56,33 @@ export class OpenBoxApi implements ICredentialType {
     },
   };
 
-  authenticate: IAuthenticateGeneric = {
-    type: 'generic',
-    properties: {
-      headers: {
-        Authorization: '=Bearer {{$credentials.apiKey}}',
-        'Content-Type': 'application/json',
-        'User-Agent': 'n8n-nodes-openbox-hook/0.0.1',
-        'X-OpenBox-SDK-Version': '0.0.1',
-      },
-    },
+  authenticate: IAuthenticate = async (
+    credentials: ICredentialDataDecryptedObject,
+    requestOptions: IHttpRequestOptions,
+  ): Promise<IHttpRequestOptions> => {
+    const apiKey = String(credentials.apiKey ?? '');
+    const agentDid = credentials.agentDid ? String(credentials.agentDid) : undefined;
+    const agentPrivateKey = credentials.agentPrivateKey ? String(credentials.agentPrivateKey) : undefined;
+
+    // Extract the path for signing; url may be relative or absolute.
+    const rawUrl = requestOptions.url ?? '';
+    let path: string;
+    try {
+      path = rawUrl.startsWith('http') ? new URL(rawUrl).pathname : rawUrl;
+    } catch {
+      path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
+    }
+
+    const headers = buildSignedHeaders(
+      String(requestOptions.method ?? 'GET'),
+      path,
+      Buffer.alloc(0),
+      apiKey,
+      agentDid,
+      agentPrivateKey,
+    );
+
+    return { ...requestOptions, headers: { ...requestOptions.headers, ...headers } };
   };
 }
 

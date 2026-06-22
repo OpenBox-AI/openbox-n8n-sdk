@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OpenBoxApi = void 0;
 exports.normalizeOpenBoxCredentials = normalizeOpenBoxCredentials;
+const signing_1 = require("../shared/signing");
 const DEFAULT_OPENBOX_URL = 'https://core.openbox.ai';
 class OpenBoxApi {
     name = 'openBoxApi';
@@ -42,16 +43,21 @@ class OpenBoxApi {
             method: 'GET',
         },
     };
-    authenticate = {
-        type: 'generic',
-        properties: {
-            headers: {
-                Authorization: '=Bearer {{$credentials.apiKey}}',
-                'Content-Type': 'application/json',
-                'User-Agent': 'n8n-nodes-openbox-hook/0.0.1',
-                'X-OpenBox-SDK-Version': '0.0.1',
-            },
-        },
+    authenticate = async (credentials, requestOptions) => {
+        const apiKey = String(credentials.apiKey ?? '');
+        const agentDid = credentials.agentDid ? String(credentials.agentDid) : undefined;
+        const agentPrivateKey = credentials.agentPrivateKey ? String(credentials.agentPrivateKey) : undefined;
+        // Extract the path for signing; url may be relative or absolute.
+        const rawUrl = requestOptions.url ?? '';
+        let path;
+        try {
+            path = rawUrl.startsWith('http') ? new URL(rawUrl).pathname : rawUrl;
+        }
+        catch {
+            path = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
+        }
+        const headers = (0, signing_1.buildSignedHeaders)(String(requestOptions.method ?? 'GET'), path, Buffer.alloc(0), apiKey, agentDid, agentPrivateKey);
+        return { ...requestOptions, headers: { ...requestOptions.headers, ...headers } };
     };
 }
 exports.OpenBoxApi = OpenBoxApi;

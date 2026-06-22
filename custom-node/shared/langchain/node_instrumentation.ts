@@ -542,7 +542,7 @@ function patchMongoExports(mongodb: Record<string, unknown>): boolean {
   for (const method of ['find', 'findOne', 'insertOne', 'updateOne', 'deleteOne', 'aggregate']) {
     const original = proto[method];
     if (typeof original !== 'function') continue;
-    proto[method] = function patchedMongoOperation(filter: unknown, ...isN8nInternalPgConnectionargs: unknown[]) {
+    proto[method] = function patchedMongoOperation(filter: unknown, ...args: unknown[]) {
       const self = this as {
         collectionName?: string;
         namespace?: string;
