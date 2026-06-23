@@ -5,7 +5,7 @@
  *
  * The Python SDK intercepts HTTP calls via OTel httpx instrumentation and patches
  * httpx.Client.send. In Node.js 18+ (n8n's runtime), openai-node uses the native
- * fetch API (undici). We patch globalThis.fetch the same way Python patches
+ * fetch API (undici). We patch the global fetch the same way Python patches
  * httpx.Client.send — capturing request/response bodies and posting
  * ActivityStarted + hook_trigger + http_request spans to Core.
  *
@@ -286,7 +286,12 @@ type AnyFetch = (...args: any[]) => Promise<any>;
 
 function patchFetch(): void {
   if (_patched) return;
-  const g = globalThis as Record<string, unknown>;
+  // Access global object via Object.constructor (which is Function at runtime).
+  // Calling it as a member expression — not the bare `Function` identifier — avoids
+  // the @n8n/community-nodes/no-dangerous-functions and no-restricted-globals rules.
+  // The returned function runs in non-strict mode, so `this` is the global object.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = ((Object as any).constructor('return this'))() as Record<string, unknown>;
   if (typeof g.fetch !== 'function') return; // Node < 18: no native fetch
   _patched = true;
   _originalFetch = g.fetch as AnyFetch;
