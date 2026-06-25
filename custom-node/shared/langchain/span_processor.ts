@@ -286,19 +286,15 @@ type AnyFetch = (...args: any[]) => Promise<any>;
 
 function patchFetch(): void {
   if (_patched) return;
-  // Access global object via Object.constructor (which is Function at runtime).
-  // Calling it as a member expression — not the bare `Function` identifier — avoids
-  // the @n8n/community-nodes/no-dangerous-functions and no-restricted-globals rules.
-  // The returned function runs in non-strict mode, so `this` is the global object.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const g = ((Object as any).constructor('return this'))() as Record<string, unknown>;
-  if (typeof g.fetch !== 'function') return; // Node < 18: no native fetch
+  if (typeof fetch !== 'function') return; // Node < 18: no native fetch
   _patched = true;
-  _originalFetch = g.fetch as AnyFetch;
+  _originalFetch = fetch as AnyFetch;
   const captured = _originalFetch!;
 
+  // @ts-expect-error -- fetch is a writable global in Node.js 18+ (undici); TypeScript's
+  // declaration via @types/node as a function type does not reflect its runtime writability.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  g.fetch = async function patchedFetch(input: any, init?: any): Promise<any> {
+  fetch = async function patchedFetch(input: any, init?: any): Promise<any> {
     // Fast-path: no active governed activity — skip all instrumentation.
     if (_activeActivities.size === 0) {
       return captured(input, init);
