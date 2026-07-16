@@ -12,6 +12,8 @@ import { IExecuteFunctions } from 'n8n-workflow';
 import { openboxRequest, SoftGovernanceError } from '../openbox-client';
 import { GovernanceVerdictResponse, LangChainGovernanceEvent } from './types';
 
+export type OnApiError = 'fail_open' | 'fail_closed';
+
 /**
  * Mirrors openbox_langgraph.types.to_server_event_type().
  *
@@ -58,14 +60,16 @@ export interface ApprovalPollResponse {
 
 export class GovernanceClient {
   private traceId: string;
+  private readonly timeoutMs?: number;
   // Exposed so span_processor can use the same IExecuteFunctions instance
   // for posting hook-level ActivityStarted events (mirrors Python's hook_governance
   // referencing the same httpx client as the main governance client).
   readonly executeFunctions: IExecuteFunctions;
 
-  constructor(executeFunctions: IExecuteFunctions, traceId: string) {
+  constructor(executeFunctions: IExecuteFunctions, traceId: string, timeoutMs?: number) {
     this.executeFunctions = executeFunctions;
     this.traceId = traceId;
+    this.timeoutMs = timeoutMs;
   }
 
   updateTraceId(traceId: string): void {
@@ -74,22 +78,27 @@ export class GovernanceClient {
 
   /**
    * evaluate_event() — POST a governance event and return the verdict.
-   * Returns null on soft failures (fail_open policy) so callers can
-   * continue without governance rather than crashing the workflow.
+   * Returns null on soft (network/other) failures when onApiError is
+   * "fail_open" (the default) so callers can continue without governance
+   * rather than crashing the workflow. When "fail_closed", the failure is
+   * rethrown instead of silently degrading to ungoverned. Auth/signing
+   * failures (GovernanceAuthError, not a SoftGovernanceError) always
+   * propagate regardless of this setting.
    */
   async evaluateEvent(
     event: LangChainGovernanceEvent,
+    onApiError: OnApiError = 'fail_open',
   ): Promise<GovernanceVerdictResponse | null> {
     try {
       return await openboxRequest<GovernanceVerdictResponse>(this.executeFunctions, {
         method: 'POST',
         path: '/api/v1/governance/evaluate',
         body: toServerEventType(event) as Record<string, unknown>,
-        noRetry: true,
         traceId: this.traceId,
+        timeoutMs: this.timeoutMs,
       });
     } catch (err) {
-      if (err instanceof SoftGovernanceError) return null;
+      if (err instanceof SoftGovernanceError && onApiError !== 'fail_closed') return null;
       throw err;
     }
   }
@@ -103,6 +112,7 @@ export class GovernanceClient {
     runId: string,
     activityId: string,
     approvalId?: string,
+    onApiError: OnApiError = 'fail_open',
   ): Promise<ApprovalPollResponse | null> {
     // If Core returned an approval_id in the evaluate response, use it as the
     // poll key (mirrors Python SDK's exc.action_id pattern). Otherwise fall
@@ -116,8 +126,8 @@ export class GovernanceClient {
         method: 'POST',
         path: '/api/v1/governance/approval',
         body: reqBody,
-        noRetry: true,
         traceId: this.traceId,
+        timeoutMs: this.timeoutMs,
       });
       const expiration = data.approval_expiration_time ?? data.approvalExpirationTime;
       if (typeof expiration === 'string' && expiration.trim()) {
@@ -128,7 +138,7 @@ export class GovernanceClient {
       }
       return data;
     } catch (err) {
-      if (err instanceof SoftGovernanceError) return null;
+      if (err instanceof SoftGovernanceError && onApiError !== 'fail_closed') return null;
       throw err;
     }
   }

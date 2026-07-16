@@ -5,10 +5,12 @@
  * Public surface mirrors openbox_langchain/__init__.py.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.safeSerialize = exports.rfc3339Now = exports.hexId = exports.verdictFromString = exports.enforceVerdict = exports.GuardrailsValidationError = exports.GovernanceBlockedError = exports.GovernanceHaltError = exports.handleWrapToolCall = exports.setupNodeHookInstrumentation = exports.OpenBoxLangChainMiddleware = exports.pollApprovalOrHalt = exports.serializeResponseToOpenAiBody = exports.serializeMessagesToOpenAiBody = exports.extractResponseMetadata = exports.extractPromptFromMessages = exports.extractLastUserMessage = exports.extractGovernanceBlocked = exports.evaluate = exports.baseEventFields = exports.applyPiiRedaction = exports.handleWrapModelCall = exports.handleWrapMemoryOp = exports.handleBeforeAgent = exports.handleAfterAgent = exports.mergeConfig = exports.GovernanceClient = void 0;
+exports.safeSerialize = exports.rfc3339Now = exports.hexId = exports.verdictFromString = exports.enforceVerdict = exports.GuardrailsValidationError = exports.GovernanceBlockedError = exports.GovernanceHaltError = exports.handleWrapToolCall = exports.setupNodeHookInstrumentation = exports.OpenBoxLangChainMiddleware = exports.pollApprovalOrHalt = exports.toErrorInfo = exports.safeString = exports.turnFromError = exports.serializeResponseToOpenAiBody = exports.serializeMessagesToOpenAiBody = exports.sendOrphanClosure = exports.hasHumanTurn = exports.extractResponseMetadata = exports.extractPromptFromMessages = exports.extractLastUserMessage = exports.extractGovernanceBlocked = exports.evaluate = exports.buildEvent = exports.baseEventFields = exports.applyPiiRedaction = exports.handleWrapModelCall = exports.handleWrapMemoryOp = exports.handleBeforeAgent = exports.handleAfterAgent = exports.mergeConfig = exports.DEFAULT_APPROVAL_MAX_WAIT_MS = exports.ALL_DATABASE_DRIVERS = exports.GovernanceClient = void 0;
 var client_1 = require("./client");
 Object.defineProperty(exports, "GovernanceClient", { enumerable: true, get: function () { return client_1.GovernanceClient; } });
 var config_1 = require("./config");
+Object.defineProperty(exports, "ALL_DATABASE_DRIVERS", { enumerable: true, get: function () { return config_1.ALL_DATABASE_DRIVERS; } });
+Object.defineProperty(exports, "DEFAULT_APPROVAL_MAX_WAIT_MS", { enumerable: true, get: function () { return config_1.DEFAULT_APPROVAL_MAX_WAIT_MS; } });
 Object.defineProperty(exports, "mergeConfig", { enumerable: true, get: function () { return config_1.mergeConfig; } });
 var hook_handlers_1 = require("./hook_handlers");
 Object.defineProperty(exports, "handleAfterAgent", { enumerable: true, get: function () { return hook_handlers_1.handleAfterAgent; } });
@@ -18,13 +20,20 @@ Object.defineProperty(exports, "handleWrapModelCall", { enumerable: true, get: f
 var hooks_1 = require("./hooks");
 Object.defineProperty(exports, "applyPiiRedaction", { enumerable: true, get: function () { return hooks_1.applyPiiRedaction; } });
 Object.defineProperty(exports, "baseEventFields", { enumerable: true, get: function () { return hooks_1.baseEventFields; } });
+Object.defineProperty(exports, "buildEvent", { enumerable: true, get: function () { return hooks_1.buildEvent; } });
 Object.defineProperty(exports, "evaluate", { enumerable: true, get: function () { return hooks_1.evaluate; } });
 Object.defineProperty(exports, "extractGovernanceBlocked", { enumerable: true, get: function () { return hooks_1.extractGovernanceBlocked; } });
 Object.defineProperty(exports, "extractLastUserMessage", { enumerable: true, get: function () { return hooks_1.extractLastUserMessage; } });
 Object.defineProperty(exports, "extractPromptFromMessages", { enumerable: true, get: function () { return hooks_1.extractPromptFromMessages; } });
 Object.defineProperty(exports, "extractResponseMetadata", { enumerable: true, get: function () { return hooks_1.extractResponseMetadata; } });
+Object.defineProperty(exports, "hasHumanTurn", { enumerable: true, get: function () { return hooks_1.hasHumanTurn; } });
+Object.defineProperty(exports, "sendOrphanClosure", { enumerable: true, get: function () { return hooks_1.sendOrphanClosure; } });
 Object.defineProperty(exports, "serializeMessagesToOpenAiBody", { enumerable: true, get: function () { return hooks_1.serializeMessagesToOpenAiBody; } });
 Object.defineProperty(exports, "serializeResponseToOpenAiBody", { enumerable: true, get: function () { return hooks_1.serializeResponseToOpenAiBody; } });
+Object.defineProperty(exports, "turnFromError", { enumerable: true, get: function () { return hooks_1.turnFromError; } });
+var error_info_1 = require("./error-info");
+Object.defineProperty(exports, "safeString", { enumerable: true, get: function () { return error_info_1.safeString; } });
+Object.defineProperty(exports, "toErrorInfo", { enumerable: true, get: function () { return error_info_1.toErrorInfo; } });
 var hitl_1 = require("./hitl");
 Object.defineProperty(exports, "pollApprovalOrHalt", { enumerable: true, get: function () { return hitl_1.pollApprovalOrHalt; } });
 var middleware_1 = require("./middleware");

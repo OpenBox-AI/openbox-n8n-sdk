@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SoftGovernanceError = void 0;
+exports.GovernanceAuthError = exports.SoftGovernanceError = void 0;
 exports.getOpenBoxCredentials = getOpenBoxCredentials;
 exports.openboxRequest = openboxRequest;
 /* eslint-disable @n8n/community-nodes/require-node-api-error */
@@ -37,7 +37,7 @@ async function openboxRequest(ctx, options) {
         url,
         headers,
         json: false,
-        timeout: OPENBOX_TIMEOUT_MS,
+        timeout: options.timeoutMs ?? OPENBOX_TIMEOUT_MS,
         body: bodyBytes.length > 0 ? bodyBytes : undefined,
         qs: options.qs,
         returnFullResponse: false,
@@ -52,8 +52,38 @@ async function openboxRequest(ctx, options) {
         return raw;
     }
     catch (err) {
+        const statusCode = extractHttpStatusCode(err);
+        if (statusCode === 401 || statusCode === 403) {
+            // Auth/signing failures always hard-fail, regardless of onApiError —
+            // a revoked/invalid key must never silently degrade to "run ungoverned".
+            throw new GovernanceAuthError(err instanceof Error ? err.message : String(err), statusCode, err);
+        }
         throw new SoftGovernanceError(err instanceof Error ? err.message : String(err), err);
     }
+}
+/**
+ * Best-effort extraction of an HTTP status code from whatever shape n8n's
+ * httpRequest helper (or an upstream NodeApiError) throws. Different n8n
+ * versions/transports surface this differently, so several paths are tried.
+ */
+function extractHttpStatusCode(err) {
+    if (err == null || typeof err !== 'object')
+        return null;
+    const e = err;
+    const candidates = [
+        e.statusCode,
+        e.httpCode,
+        e.response?.statusCode,
+        e.response?.status,
+        e.cause?.statusCode,
+        e.cause?.response?.status,
+    ];
+    for (const c of candidates) {
+        const n = typeof c === 'string' ? Number(c) : c;
+        if (typeof n === 'number' && Number.isFinite(n))
+            return n;
+    }
+    return null;
 }
 /**
  * Marker error for governance/network failures. Callers that can safely
@@ -69,3 +99,18 @@ class SoftGovernanceError extends Error {
     }
 }
 exports.SoftGovernanceError = SoftGovernanceError;
+/**
+ * A 401/403 from Core. Always a hard failure — never caught as fail-open,
+ * regardless of the configured onApiError policy.
+ */
+class GovernanceAuthError extends Error {
+    statusCode;
+    cause;
+    constructor(message, statusCode, cause) {
+        super(message);
+        this.name = 'GovernanceAuthError';
+        this.statusCode = statusCode;
+        this.cause = cause;
+    }
+}
+exports.GovernanceAuthError = GovernanceAuthError;

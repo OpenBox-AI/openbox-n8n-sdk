@@ -17,6 +17,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.OpenBoxAgent = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
 const credential_test_1 = require("../../shared/credential-test");
+const openbox_client_1 = require("../../shared/openbox-client");
 const langchain_1 = require("../../shared/langchain");
 // ── ToolMessage factory ───────────────────────────────────────────────────────
 // @langchain/core is always present in n8n's runtime. Module name stored in a
@@ -222,6 +223,111 @@ class OpenBoxAgent {
                     },
                 ],
             },
+            // ── Advanced Governance ─────────────────────────────────────────────────
+            {
+                displayName: 'Advanced Governance',
+                name: 'governance',
+                type: 'collection',
+                placeholder: 'Add Governance Option',
+                default: {},
+                options: [
+                    {
+                        displayName: 'Approval Max Wait (Seconds)',
+                        name: 'hitlMaxWaitSeconds',
+                        type: 'number',
+                        default: 3600,
+                        description: 'How long to wait for a human approval before halting. 0 = wait indefinitely.',
+                    },
+                    {
+                        displayName: 'Approval Poll Interval (Seconds)',
+                        name: 'hitlPollIntervalSeconds',
+                        type: 'number',
+                        default: 5,
+                    },
+                    {
+                        displayName: 'Database Drivers to Instrument',
+                        name: 'databaseDrivers',
+                        type: 'multiOptions',
+                        options: [
+                            { name: 'Ioredis', value: 'ioredis' },
+                            { name: 'MongoDB', value: 'mongodb' },
+                            { name: 'MySQL (Mysql2)', value: 'mysql2' },
+                            { name: 'PostgreSQL (Pg)', value: 'pg' },
+                            { name: 'Redis', value: 'redis' },
+                        ],
+                        default: ['pg', 'mysql2', 'mongodb', 'redis', 'ioredis'],
+                        displayOptions: { show: { instrumentDatabases: [true] } },
+                    },
+                    {
+                        displayName: 'Governance Events to Send',
+                        name: 'eventsToSend',
+                        type: 'multiOptions',
+                        options: [
+                            { name: 'LLM Completed', value: 'llmEnd' },
+                            { name: 'LLM Started', value: 'llmStart' },
+                            { name: 'Tool Completed', value: 'toolEnd' },
+                            { name: 'Tool Started', value: 'toolStart' },
+                            { name: 'Workflow Completed', value: 'chainEnd' },
+                            { name: 'Workflow Started', value: 'chainStart' },
+                        ],
+                        default: ['chainStart', 'chainEnd', 'llmStart', 'llmEnd', 'toolStart', 'toolEnd'],
+                        description: 'Which lifecycle events are sent to OpenBox for evaluation',
+                    },
+                    {
+                        displayName: 'Governance Request Timeout (Seconds)',
+                        name: 'governanceTimeoutSeconds',
+                        type: 'number',
+                        default: 30,
+                        description: 'HTTP timeout for calls to the OpenBox Core API',
+                    },
+                    {
+                        displayName: 'Human-in-the-Loop Approval Enabled',
+                        name: 'hitlEnabled',
+                        type: 'boolean',
+                        default: true,
+                    },
+                    {
+                        displayName: 'Instrument Databases',
+                        name: 'instrumentDatabases',
+                        type: 'boolean',
+                        default: true,
+                        description: 'Whether database queries during tool execution are captured as governance spans',
+                    },
+                    {
+                        displayName: 'Instrument File I/O',
+                        name: 'instrumentFileIo',
+                        type: 'boolean',
+                        default: false,
+                        description: 'Whether file reads/writes during tool execution are captured as governance spans',
+                    },
+                    {
+                        displayName: 'Instrument HTTP Calls',
+                        name: 'instrumentHttp',
+                        type: 'boolean',
+                        default: true,
+                        description: 'Whether outgoing HTTP calls (e.g. to the LLM provider) are captured as governance spans',
+                    },
+                    {
+                        displayName: 'On API Error',
+                        name: 'onApiError',
+                        type: 'options',
+                        options: [
+                            { name: 'Fail Open (Continue Ungoverned)', value: 'fail_open' },
+                            { name: 'Fail Closed (Stop the Workflow)', value: 'fail_closed' },
+                        ],
+                        default: 'fail_open',
+                        description: 'What to do when OpenBox Core is unreachable or returns an error. Auth/signing failures (invalid API key) always stop the workflow regardless of this setting.',
+                    },
+                    {
+                        displayName: 'Tools to Exclude From Governance',
+                        name: 'skipToolTypes',
+                        type: 'string',
+                        default: '',
+                        placeholder: 'toolNameA, toolNameB',
+                        description: 'Comma-separated tool names whose calls are never governed',
+                    },
+                ],
+            },
         ],
     };
     methods = {
@@ -255,8 +361,42 @@ class OpenBoxAgent {
         // Bind tools to model once (immutable across items)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const boundModel = tools.length > 0 ? model.bindTools(tools) : model;
+        // ── Advanced Governance options → middleware config ──────────────────────
+        const governance = this.getNodeParameter('governance', 0, {});
+        const events = new Set(governance.eventsToSend ?? ['chainStart', 'chainEnd', 'llmStart', 'llmEnd', 'toolStart', 'toolEnd']);
+        const skipToolTypes = new Set((governance.skipToolTypes ?? '')
+            .split(',')
+            .map((t) => t.trim())
+            .filter((t) => t.length > 0));
+        // 0 means "wait indefinitely" in the UI — translates to the null the
+        // middleware understands as an explicit opt-out of a finite timeout.
+        const hitlMaxWaitSeconds = governance.hitlMaxWaitSeconds ?? 3600;
+        const middlewareOptions = {
+            agentName: workflowType,
+            taskQueue: 'n8n',
+            onApiError: governance.onApiError ?? 'fail_open',
+            governanceTimeout: governance.governanceTimeoutSeconds ?? 30,
+            skipToolTypes,
+            sendChainStartEvent: events.has('chainStart'),
+            sendChainEndEvent: events.has('chainEnd'),
+            sendLlmStartEvent: events.has('llmStart'),
+            sendLlmEndEvent: events.has('llmEnd'),
+            sendToolStartEvent: events.has('toolStart'),
+            sendToolEndEvent: events.has('toolEnd'),
+            hitl: {
+                enabled: governance.hitlEnabled ?? true,
+                pollIntervalMs: (governance.hitlPollIntervalSeconds ?? 5) * 1000,
+                timeoutMs: hitlMaxWaitSeconds > 0 ? hitlMaxWaitSeconds * 1000 : null,
+            },
+            instrumentHttp: governance.instrumentHttp ?? true,
+            instrumentFileIo: governance.instrumentFileIo ?? false,
+            instrumentDatabases: governance.instrumentDatabases ?? true,
+            databases: (governance.instrumentDatabases ?? true)
+                ? new Set(governance.databaseDrivers ?? ['pg', 'mysql2', 'mongodb', 'redis', 'ioredis'])
+                : new Set(),
+        };
         // ── Build middleware (one instance per execute() call, reset per item) ───
-        const middleware = new langchain_1.OpenBoxLangChainMiddleware({ agentName: workflowType, taskQueue: 'n8n' }, this);
+        const middleware = new langchain_1.OpenBoxLangChainMiddleware(middlewareOptions, this);
         for (let i = 0; i < items.length; i++) {
             const itemJson = items[i].json;
             // ── Resolve session_id ─────────────────────────────────────────────────
@@ -294,17 +434,23 @@ class OpenBoxAgent {
             // (WorkflowCompleted) can always fire — matching Python SDK's behaviour
             // of sending WorkflowCompleted with status "failed" before re-raising.
             let loopError = null;
+            // Turn identity is minted by beforeAgent() and threaded through every
+            // subsequent call — never stored as mutable state on the middleware
+            // instance (see middleware.ts). If beforeAgent itself throws (e.g. a
+            // governance block on the initial signal), the turn is still recovered
+            // from the error via turnFromError() so afterAgent can still fire.
+            let turn;
             try {
                 // ════════════════════════════════════════════════════════════════════
                 // before_agent — SignalReceived + WorkflowStarted + pre-screen
                 // ════════════════════════════════════════════════════════════════════
-                await middleware.beforeAgent({ messages: [['human', userMessage]] }, threadId);
+                turn = await middleware.beforeAgent({ messages: [['human', userMessage]] }, threadId);
                 // ── Load memory (after beforeAgent so middleware IDs are set) ────────
                 let chatHistory = [];
                 if (memory) {
                     try {
                         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        const vars = await middleware.wrapMemoryOp('loadMemoryVariables', () => memory.loadMemoryVariables({ input: userMessage }));
+                        const vars = await middleware.wrapMemoryOp(turn, 'load_memory', () => memory.loadMemoryVariables({ input: userMessage }));
                         chatHistory = (vars.chat_history ?? vars.history ?? []);
                     }
                     catch { /* non-fatal */ }
@@ -322,7 +468,7 @@ class OpenBoxAgent {
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     let response;
                     try {
-                        response = await middleware.wrapModelCall(messages, () => boundModel.invoke(messages, { signal: cancelSignal }));
+                        response = await middleware.wrapModelCall(turn, messages, () => boundModel.invoke(messages, { signal: cancelSignal }));
                     }
                     catch (err) {
                         loopError = err;
@@ -347,7 +493,7 @@ class OpenBoxAgent {
                         }
                         let toolResult = '';
                         try {
-                            const raw = await middleware.wrapToolCall(toolCall.name, toolCall.args, () => tool.invoke(toolCall.args));
+                            const raw = await middleware.wrapToolCall(turn, toolCall.name, toolCall.args, () => tool.invoke(toolCall.args));
                             // null/undefined (e.g. HTTP node with empty/null response body) → empty string
                             // so the LLM receives a ToolMessage with valid content instead of crashing.
                             if (raw != null) {
@@ -394,20 +540,29 @@ class OpenBoxAgent {
                 // because any break-with-error also sets loopError before reaching this point.
                 if (memory && loopError == null) {
                     try {
-                        await middleware.wrapMemoryOp('saveContext', () => memory.saveContext({ input: userMessage }, { output: finalOutput }));
+                        await middleware.wrapMemoryOp(turn, 'save_context', () => memory.saveContext({ input: userMessage }, { output: finalOutput }));
                     }
                     catch { /* non-fatal */ }
                 }
             }
             catch (err) {
                 loopError = err;
+                // beforeAgent can throw before returning its turn (e.g. a governance
+                // block on the initial signal) — recover it from the error so
+                // afterAgent still has the right workflow_id/run_id to close with.
+                if (!turn)
+                    turn = (0, langchain_1.turnFromError)(err);
             }
             // ══════════════════════════════════════════════════════════════════════
             // after_agent — WorkflowCompleted (always fires; failed status on error)
             // ══════════════════════════════════════════════════════════════════════
+            // turn should always be set by this point (beforeAgent mints it
+            // synchronously before anything else can throw) — this fallback only
+            // guards against a genuinely unexpected code path.
+            const effectiveTurn = turn ?? { workflowId: threadId, runId: threadId };
             let completedVerdict;
             try {
-                completedVerdict = await middleware.afterAgent({ messages }, loopError instanceof Error ? loopError : loopError != null ? new Error(String(loopError)) : undefined);
+                completedVerdict = await middleware.afterAgent(effectiveTurn, { messages }, loopError instanceof Error ? loopError : loopError != null ? new Error(String(loopError)) : undefined);
             }
             catch (err) {
                 if (loopError == null) {
@@ -438,8 +593,8 @@ class OpenBoxAgent {
                     ...itemJson,
                     output: finalOutput,
                     _openbox: {
-                        workflowId: middleware._workflowId,
-                        runId: middleware._runId,
+                        workflowId: effectiveTurn.workflowId,
+                        runId: effectiveTurn.runId,
                         toolCallCount,
                         iterations,
                     },
@@ -453,8 +608,18 @@ class OpenBoxAgent {
 exports.OpenBoxAgent = OpenBoxAgent;
 // ── Governance error → NodeOperationError ─────────────────────────────────────
 function mapGovernanceError(err, ctx, itemIndex) {
+    if (err instanceof openbox_client_1.GovernanceAuthError) {
+        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), 'OpenBox credential rejected by Core (401/403) — check the API key, Agent DID, and Agent Private Key.', { itemIndex, description: err.message });
+    }
     if (err instanceof langchain_1.GovernanceHaltError) {
-        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), err.message, { itemIndex });
+        // err.message is one of: "Activity rejected: ...", "Approval expired for
+        // activity ...", "Approval timed out for activity ...", or "Approval
+        // required for activity ..." (HITL disabled) — always specific by this
+        // point (see unwrapGovernanceError in verdict.ts, which recovers this
+        // error even when an LLM/tool client wrapped it in a generic transport
+        // error like "Connection error."). Surface it as a description under a
+        // fixed title, consistent with the other governance error mappings below.
+        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), 'OpenBox governance halted the workflow', { itemIndex, description: err.message });
     }
     if (err instanceof langchain_1.GovernanceBlockedError) {
         throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), `OpenBox governance requires approval`, { itemIndex, description: err.message });

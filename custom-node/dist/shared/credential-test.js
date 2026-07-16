@@ -23,12 +23,18 @@ async function testOpenBoxCredential(credential) {
         // n8n-workflow 1.x types don't declare httpRequest on ICredentialTestFunctions,
         // but the runtime exposes it (the linter rule explicitly requires it).
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await this.helpers.httpRequest({
+        const response = await this.helpers.httpRequest({
             method: 'GET',
             url: `${creds.openboxUrl}${path}`,
             headers,
             json: true,
         });
+        // Best-effort response-shape check — Core's exact schema for this endpoint
+        // isn't documented, so only an explicit `valid: false` is treated as a
+        // failure; anything else that didn't throw is accepted as success.
+        if (response && typeof response === 'object' && 'valid' in response && !response.valid) {
+            return { status: 'Error', message: 'OpenBox credential test failed: Core reported the credential as invalid' };
+        }
         return { status: 'OK', message: 'Connection successful' };
     }
     catch (err) {

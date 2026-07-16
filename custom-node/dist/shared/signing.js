@@ -13,6 +13,11 @@ exports.EMPTY_BODY_SHA256 = void 0;
 exports.buildSignedHeaders = buildSignedHeaders;
 exports.serializeBody = serializeBody;
 const crypto_1 = require("crypto");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pkg = require('../package.json');
+const SDK_PACKAGE_VERSION = pkg.version;
+/** Mirrors openbox-langchain-sdk-ts's sdk-metadata.ts identity scheme. */
+const SDK_IDENTITY = `openbox-langchain-typescript-v${SDK_PACKAGE_VERSION}`;
 exports.EMPTY_BODY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 /**
  * Build the base auth headers (always sent).
@@ -22,8 +27,8 @@ function baseHeaders(apiKey) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        'User-Agent': 'n8n-nodes-openbox-hook/0.0.1',
-        'X-OpenBox-SDK-Version': '0.0.1',
+        'User-Agent': `n8n-nodes-openbox-hook/${SDK_PACKAGE_VERSION}`,
+        'X-OpenBox-SDK-Version': SDK_IDENTITY,
     };
 }
 /**

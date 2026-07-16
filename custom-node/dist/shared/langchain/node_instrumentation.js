@@ -7,8 +7,12 @@ const _procMod = 'process';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const _env = require(_procMod).env;
 const span_processor_1 = require("./span_processor");
+const config_1 = require("./config");
+const error_info_1 = require("./error-info");
 const types_1 = require("./types");
+const verdict_1 = require("./verdict");
 let installed = false;
+const noopLogger = { warn: () => { } };
 // Skip system/internal paths — mirrors Python SDK's file skip patterns.
 const FILE_SKIP_PATTERNS = ['/dev/', '/proc/', '/sys/', '/node_modules/'];
 function shouldSkipFilePath(path) {
@@ -27,7 +31,7 @@ function spanBase(name, kind, stage, startMs, error, endMs) {
         end_time: completedEndMs == null ? null : completedEndMs * 1_000_000,
         duration_ns: completedEndMs == null ? null : (completedEndMs - startMs) * 1_000_000,
         attributes: {},
-        status: { code: error ? 'ERROR' : 'UNSET', description: error ? String(error) : null },
+        status: { code: error ? 'ERROR' : 'UNSET', description: error ? (0, error_info_1.safeString)(error) : null },
         events: [],
     };
 }
@@ -49,7 +53,7 @@ function buildFileSpanData(activityId, opts) {
         file_path: opts.filePath,
         file_mode: opts.fileMode,
         file_operation: opts.operation,
-        error: opts.error ? String(opts.error) : null,
+        error: opts.error ? (0, error_info_1.safeString)(opts.error) : null,
         activity_id: activityId,
     };
     if (opts.bytesRead != null)
@@ -77,7 +81,7 @@ function buildDbSpanData(activityId, opts) {
         server_address: opts.host ?? null,
         server_port: opts.port != null && Number.isFinite(Number(opts.port)) ? Number(opts.port) : null,
         rowcount: opts.rowcount != null && Number(opts.rowcount) >= 0 ? Number(opts.rowcount) : null,
-        error: opts.error ? String(opts.error) : null,
+        error: opts.error ? (0, error_info_1.safeString)(opts.error) : null,
         activity_id: activityId,
     };
 }
@@ -210,6 +214,51 @@ function patchFsPromises(fs) {
             return wrapFileHandle(handle, activityId, filePath, fileMode, startMs);
         };
     }
+}
+/**
+ * Patch readFileSync/writeFileSync/mkdirSync. A sync call can't await Core
+ * before it runs, so these are fire-and-forget: audited, but never
+ * pre-blockable the way the async/callback variants above are.
+ */
+function patchFsSync(fs) {
+    const target = fs;
+    if (target._openboxSyncPatched)
+        return;
+    target._openboxSyncPatched = true;
+    patchSyncOp(target, 'readFileSync', 'r', false);
+    patchSyncOp(target, 'writeFileSync', 'w', true);
+    patchSyncOp(target, 'mkdirSync', 'w', false);
+}
+function patchSyncOp(target, operation, fileMode, capturesWriteData) {
+    const original = target[operation];
+    if (typeof original !== 'function')
+        return;
+    target[operation] = function patchedSyncOp(path, ...args) {
+        const activityId = (0, span_processor_1.getCurrentActivityId)();
+        if (!activityId)
+            return Reflect.apply(original, this, [path, ...args]);
+        const filePath = String(path);
+        if (shouldSkipFilePath(filePath))
+            return Reflect.apply(original, this, [path, ...args]);
+        const startMs = Date.now();
+        try {
+            const result = Reflect.apply(original, this, [path, ...args]);
+            const bytesRead = !capturesWriteData && (typeof result === 'string' || Buffer.isBuffer(result))
+                ? Buffer.byteLength(result)
+                : undefined;
+            const bytesWritten = capturesWriteData && (typeof args[0] === 'string' || Buffer.isBuffer(args[0]))
+                ? Buffer.byteLength(args[0])
+                : undefined;
+            void evaluateFile(activityId, {
+                filePath, fileMode, operation, stage: 'completed', startMs, endMs: Date.now(), bytesRead, bytesWritten,
+            });
+            return result;
+        }
+        catch (err) {
+            void evaluateFile(activityId, { filePath, fileMode, operation, stage: 'completed', startMs, endMs: Date.now(), error: err });
+            throw err;
+        }
+    };
 }
 function patchFsCallbacks(fs) {
     const target = fs;
@@ -345,12 +394,24 @@ function patchPgExports(pg) {
                     return original.call(self, query, ...args);
                 }
                 return evaluateDb(activityId, { ...dbOpts, stage: 'started', startMs })
-                    .catch(() => { })
+                    .catch((err) => {
+                    // Governance verdicts (require_approval/block/halt) must stop the query
+                    // from running — only swallow non-governance failures (e.g. Core API
+                    // unreachable), which evaluateDb/evaluateHookSpan already fail-open on.
+                    if (err instanceof verdict_1.GovernanceBlockedError)
+                        throw err;
+                })
                     .then(() => original.call(self, query, ...args)
                     .then(async (value) => {
                     await evaluateDb(activityId, {
                         ...dbOpts, stage: 'completed', startMs, endMs: Date.now(), rowcount: value?.rowCount,
-                    }).catch(() => { });
+                    }).catch((hookErr) => {
+                        // require_approval on a completed span can't un-run the query —
+                        // swallow it and rely on the caller's hasActivityAbort() check to
+                        // poll (mirrors the HTTP fetch patch). block/halt still propagate.
+                        if (hookErr instanceof verdict_1.GovernanceBlockedError && hookErr.verdict !== 'require_approval')
+                            throw hookErr;
+                    });
                     return value;
                 }, async (err) => {
                     await evaluateDb(activityId, {
@@ -424,7 +485,7 @@ function patchMysql2Exports(mysql2) {
         return false;
     }
 }
-function patchDatabaseModuleLoader() {
+function patchDatabaseModuleLoader(drivers) {
     try {
         // 'module' resolves to the same built-in as 'node:module'; stored in a variable
         // so the literal string does not trigger the no-restricted-imports rule.
@@ -437,19 +498,19 @@ function patchDatabaseModuleLoader() {
         Module._openboxDbPatched = true;
         Module._load = function patchedModuleLoad(request, parent, isMain) {
             const exported = originalLoad.apply(this, [request, parent, isMain]);
-            if (request === 'pg' && exported && typeof exported === 'object') {
+            if (request === 'pg' && drivers.has('pg') && exported && typeof exported === 'object') {
                 patchPgExports(exported);
             }
-            else if (request === 'mysql2' && exported && typeof exported === 'object') {
+            else if (request === 'mysql2' && drivers.has('mysql2') && exported && typeof exported === 'object') {
                 patchMysql2Exports(exported);
             }
-            else if (request === 'mongodb' && exported && typeof exported === 'object') {
+            else if (request === 'mongodb' && drivers.has('mongodb') && exported && typeof exported === 'object') {
                 patchMongoExports(exported);
             }
-            else if (request === 'redis' && exported && typeof exported === 'object') {
+            else if (request === 'redis' && drivers.has('redis') && exported && typeof exported === 'object') {
                 patchRedisExports(exported);
             }
-            else if (request === 'ioredis' && exported && typeof exported === 'function') {
+            else if (request === 'ioredis' && drivers.has('ioredis') && exported && typeof exported === 'function') {
                 patchIoRedisExports(exported);
             }
             return exported;
@@ -609,8 +670,14 @@ function patchRedisClient(client) {
     return true;
 }
 function setupNodeHookInstrumentation(options = {}) {
-    if (installed)
+    const logger = options.logger ?? noopLogger;
+    if (installed) {
+        // Instrumentation state (all the module-level _openbox*Patched flags) is
+        // process-global — a second call in the same process reuses it rather
+        // than failing or silently no-op'ing without any signal.
+        logger.warn('OpenBox instrumentation already installed in this process — reusing existing patches.');
         return;
+    }
     installed = true;
     if (options.fileIo ?? true) {
         try {
@@ -621,18 +688,25 @@ function setupNodeHookInstrumentation(options = {}) {
             const fs = require(_fsMod);
             patchFsPromises(fs);
             patchFsCallbacks(fs);
+            patchFsSync(fs);
         }
-        catch {
-            // optional instrumentation
+        catch (err) {
+            logger.warn('fs instrumentation failed to install', err);
         }
     }
     const databasesEnabledByEnv = _env.OPENBOX_INSTRUMENT_DATABASES !== 'false';
-    if ((options.databases ?? true) && databasesEnabledByEnv) {
-        patchDatabaseModuleLoader();
-        patchPg();
-        patchMysql2();
-        patchMongo();
-        patchRedis();
-        patchIoRedis();
+    const drivers = options.databases ?? new Set(config_1.ALL_DATABASE_DRIVERS);
+    if (databasesEnabledByEnv && drivers.size > 0) {
+        patchDatabaseModuleLoader(drivers);
+        if (drivers.has('pg'))
+            patchPg();
+        if (drivers.has('mysql2'))
+            patchMysql2();
+        if (drivers.has('mongodb'))
+            patchMongo();
+        if (drivers.has('redis'))
+            patchRedis();
+        if (drivers.has('ioredis'))
+            patchIoRedis();
     }
 }

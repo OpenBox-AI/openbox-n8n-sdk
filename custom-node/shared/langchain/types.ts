@@ -31,6 +31,16 @@ export interface GovernanceVerdictResponse {
 }
 
 /**
+ * Structured error shape required by Core — a bare string in the `error` field
+ * of a lifecycle event is rejected. Mirrors openbox-langchain-sdk-ts's ErrorInfo.
+ */
+export interface ErrorInfo {
+  type: string;
+  message: string;
+  stack_trace?: string;
+}
+
+/**
  * Mirrors LangChainGovernanceEvent dataclass. All optional fields that are
  * not always present are left optional so partial construction is ergonomic.
  */
@@ -49,21 +59,23 @@ export interface LangChainGovernanceEvent {
   activity_output?: unknown;
   status?: 'completed' | 'failed';
   duration_ms?: number;
-  error?: unknown;
+  error?: ErrorInfo;
   spans?: unknown[];
   span_count?: number;
   workflow_output?: unknown;
+  agent_name?: string;
+  extra?: Record<string, unknown>;
   // SignalReceived
   signal_name?: string;
   signal_args?: unknown[];
   // LLM events
   prompt?: string;
-  llm_model?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-  total_tokens?: number;
+  llm_model?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
   has_tool_calls?: boolean;
-  completion?: string;
+  completion?: string | null;
   // Tool events
   tool_name?: string;
   tool_type?: string;
@@ -77,16 +89,82 @@ export function rfc3339Now(): string {
   return new Date().toISOString();
 }
 
-/** safe_serialize() — mirrors openbox_langgraph.types.safe_serialize */
+/**
+ * safe_serialize() — recursive, cycle-safe JSON coercion.
+ *
+ * Unlike a bare JSON.parse(JSON.stringify(...)) round-trip, this:
+ *  - replaces only the cyclic edge with "[Circular]" (siblings survive)
+ *  - converts Map → plain object, Set → array (JSON.stringify turns both into "{}")
+ *  - converts BigInt → string, non-finite numbers → null
+ *  - never throws, even for a hostile toString()/null-prototype value
+ */
 export function safeSerialize(value: unknown): unknown {
+  return toJsonSafeInner(value, new WeakSet());
+}
+
+function toJsonSafeInner(value: unknown, seen: WeakSet<object>): unknown {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return value;
+
+  const t = typeof value;
+  if (t === 'string' || t === 'boolean') return value;
+  if (t === 'number') return Number.isFinite(value as number) ? value : null;
+  if (t === 'bigint') return (value as bigint).toString();
+  if (t === 'function' || t === 'symbol') return null;
+
+  if (value instanceof Date) return value.toISOString();
+
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    return value.map((v) => toJsonSafeInner(v, seen));
   }
+
+  if (value instanceof Map) {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of value) obj[String(k)] = toJsonSafeInner(v, seen);
+    return obj;
+  }
+
+  if (value instanceof Set) {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    return Array.from(value.values()).map((v) => toJsonSafeInner(v, seen));
+  }
+
+  if (t === 'object') {
+    if (seen.has(value as object)) return '[Circular]';
+    seen.add(value as object);
+
+    const rec = value as Record<string, unknown>;
+    const toJson = (rec as { toJSON?: unknown }).toJSON;
+    if (typeof toJson === 'function') {
+      try {
+        return toJsonSafeInner((toJson as () => unknown).call(rec), seen);
+      } catch {
+        // fall through to plain-object field enumeration
+      }
+    }
+
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(rec)) {
+      // A getter/accessor property can throw on read (hostile input, or a
+      // proxy) — guard each field individually so one bad property doesn't
+      // take down serialization of the whole object.
+      try {
+        out[key] = toJsonSafeInner(rec[key], seen);
+      } catch {
+        out[key] = '[Unserializable]';
+      }
+    }
+    return out;
+  }
+
   try {
-    return JSON.parse(JSON.stringify(value));
-  } catch {
     return String(value);
+  } catch {
+    return '[Unserializable]';
   }
 }
 

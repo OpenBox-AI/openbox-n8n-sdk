@@ -42,34 +42,40 @@ function toServerEventType(event) {
 }
 class GovernanceClient {
     traceId;
+    timeoutMs;
     // Exposed so span_processor can use the same IExecuteFunctions instance
     // for posting hook-level ActivityStarted events (mirrors Python's hook_governance
     // referencing the same httpx client as the main governance client).
     executeFunctions;
-    constructor(executeFunctions, traceId) {
+    constructor(executeFunctions, traceId, timeoutMs) {
         this.executeFunctions = executeFunctions;
         this.traceId = traceId;
+        this.timeoutMs = timeoutMs;
     }
     updateTraceId(traceId) {
         this.traceId = traceId;
     }
     /**
      * evaluate_event() — POST a governance event and return the verdict.
-     * Returns null on soft failures (fail_open policy) so callers can
-     * continue without governance rather than crashing the workflow.
+     * Returns null on soft (network/other) failures when onApiError is
+     * "fail_open" (the default) so callers can continue without governance
+     * rather than crashing the workflow. When "fail_closed", the failure is
+     * rethrown instead of silently degrading to ungoverned. Auth/signing
+     * failures (GovernanceAuthError, not a SoftGovernanceError) always
+     * propagate regardless of this setting.
      */
-    async evaluateEvent(event) {
+    async evaluateEvent(event, onApiError = 'fail_open') {
         try {
             return await (0, openbox_client_1.openboxRequest)(this.executeFunctions, {
                 method: 'POST',
                 path: '/api/v1/governance/evaluate',
                 body: toServerEventType(event),
-                noRetry: true,
                 traceId: this.traceId,
+                timeoutMs: this.timeoutMs,
             });
         }
         catch (err) {
-            if (err instanceof openbox_client_1.SoftGovernanceError)
+            if (err instanceof openbox_client_1.SoftGovernanceError && onApiError !== 'fail_closed')
                 return null;
             throw err;
         }
@@ -78,7 +84,7 @@ class GovernanceClient {
      * poll_approval() — POST HITL poll payload to Core.
      * Mirrors openbox_langgraph.client.GovernanceClient.poll_approval().
      */
-    async pollApproval(workflowId, runId, activityId, approvalId) {
+    async pollApproval(workflowId, runId, activityId, approvalId, onApiError = 'fail_open') {
         // If Core returned an approval_id in the evaluate response, use it as the
         // poll key (mirrors Python SDK's exc.action_id pattern). Otherwise fall
         // back to the triple (workflow_id, run_id, activity_id).
@@ -91,8 +97,8 @@ class GovernanceClient {
                 method: 'POST',
                 path: '/api/v1/governance/approval',
                 body: reqBody,
-                noRetry: true,
                 traceId: this.traceId,
+                timeoutMs: this.timeoutMs,
             });
             const expiration = data.approval_expiration_time ?? data.approvalExpirationTime;
             if (typeof expiration === 'string' && expiration.trim()) {
@@ -104,7 +110,7 @@ class GovernanceClient {
             return data;
         }
         catch (err) {
-            if (err instanceof openbox_client_1.SoftGovernanceError)
+            if (err instanceof openbox_client_1.SoftGovernanceError && onApiError !== 'fail_closed')
                 return null;
             throw err;
         }

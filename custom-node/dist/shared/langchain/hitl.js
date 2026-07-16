@@ -8,27 +8,40 @@ const { setTimeout: _setTimeout } = require(_timersMod);
 function sleep(ms) {
     return new Promise((resolve) => _setTimeout(resolve, ms));
 }
-async function pollApprovalOrHalt(mw, activityId, activityType, approvalId) {
+async function pollApprovalOrHalt(mw, turn, activityId, activityType, approvalId) {
     if (!mw._config.hitl.enabled) {
         throw new verdict_1.GovernanceHaltError(`Approval required for activity ${activityType}`);
     }
+    const timeoutMs = mw._config.hitl.timeoutMs;
     const startedAt = Date.now();
-    while (Date.now() - startedAt <= mw._config.hitl.timeoutMs) {
-        const response = await mw._client.pollApproval(mw._workflowId, mw._runId, activityId, approvalId);
+    while (timeoutMs == null || Date.now() - startedAt <= timeoutMs) {
+        const response = await mw._client.pollApproval(turn.workflowId, turn.runId, activityId, approvalId, mw._config.onApiError);
         if (response == null) {
             await sleep(mw._config.hitl.pollIntervalMs);
             continue;
         }
         if (response.expired) {
-            throw new verdict_1.GovernanceHaltError(`Approval expired for activity ${activityType} (workflow_id=${mw._workflowId}, run_id=${mw._runId}, activity_id=${activityId})`);
+            throw new verdict_1.GovernanceHaltError(`Approval expired for activity ${activityType} (workflow_id=${turn.workflowId}, run_id=${turn.runId}, activity_id=${activityId})`);
         }
-        const verdict = (0, verdict_1.verdictFromString)(response.arm ?? response.verdict ?? response.action);
+        // A response body with no arm/verdict/action field at all means Core
+        // hasn't recorded a human decision yet (still pending) — NOT "allow".
+        // verdictFromString(undefined) defaults to 'allow' (the correct default
+        // for the initial governance-evaluate response, where an unset field
+        // means "no restriction stated"), but reusing that default here would
+        // resolve the poll loop on its very first tick, before anyone approved
+        // anything. Only interpret a verdict once Core actually sent one.
+        const rawVerdict = response.arm ?? response.verdict ?? response.action;
+        if (typeof rawVerdict !== 'string' || rawVerdict.trim() === '') {
+            await sleep(mw._config.hitl.pollIntervalMs);
+            continue;
+        }
+        const verdict = (0, verdict_1.verdictFromString)(rawVerdict);
         if (verdict === 'allow')
             return;
         if (verdict === 'block' || verdict === 'halt') {
-            throw new verdict_1.GovernanceHaltError(`Activity rejected: ${response.reason ?? 'Activity rejected'}`);
+            throw new verdict_1.GovernanceHaltError((0, verdict_1.formatActivityRejectedMessage)(response.reason));
         }
         await sleep(mw._config.hitl.pollIntervalMs);
     }
-    throw new verdict_1.GovernanceHaltError(`Approval timed out for activity ${activityType} (workflow_id=${mw._workflowId}, run_id=${mw._runId}, activity_id=${activityId})`);
+    throw new verdict_1.GovernanceHaltError(`Approval timed out for activity ${activityType} (workflow_id=${turn.workflowId}, run_id=${turn.runId}, activity_id=${activityId})`);
 }

@@ -11,6 +11,13 @@ class OpenBoxApi {
     icon = 'file:openbox.svg';
     properties = [
         {
+            displayName: 'API Base URL',
+            name: 'openboxUrl',
+            type: 'string',
+            default: DEFAULT_OPENBOX_URL,
+            description: 'OpenBox Core API base URL. Leave as default unless running a self-hosted Core instance.',
+        },
+        {
             displayName: 'API Key',
             name: 'apiKey',
             type: 'string',
@@ -38,7 +45,7 @@ class OpenBoxApi {
     ];
     test = {
         request: {
-            baseURL: DEFAULT_OPENBOX_URL,
+            baseURL: '={{$credentials.openboxUrl || "' + DEFAULT_OPENBOX_URL + '"}}',
             url: '/api/v1/auth/validate',
             method: 'GET',
         },
@@ -66,8 +73,9 @@ function normalizeOpenBoxCredentials(raw) {
     if (!apiKey) {
         throw new Error('OpenBox credential is missing the API key.');
     }
+    const rawUrl = raw.openboxUrl ? String(raw.openboxUrl).trim().replace(/\/+$/, '') : '';
     return {
-        openboxUrl: DEFAULT_OPENBOX_URL,
+        openboxUrl: rawUrl || DEFAULT_OPENBOX_URL,
         apiKey,
         agentDid: raw.agentDid ? String(raw.agentDid) : undefined,
         agentPrivateKey: raw.agentPrivateKey ? String(raw.agentPrivateKey) : undefined,

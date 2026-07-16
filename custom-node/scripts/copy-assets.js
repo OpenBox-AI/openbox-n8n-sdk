@@ -19,6 +19,16 @@ const copies = [
     src: path.join(ROOT, 'assets', 'logomark.svg'),
     dest: path.join(ROOT, 'dist', 'credentials', 'openbox.svg'),
   },
+  // package.json — shared/signing.ts reads its own version via a relative
+  // require('../package.json') so the X-OpenBox-SDK-Version header can never
+  // drift from the published version. That require resolves relative to the
+  // COMPILED file (dist/shared/signing.js → ../package.json = dist/package.json),
+  // so the source package.json must be mirrored into dist/ at the same relative
+  // depth as shared/signing.ts is from the project root.
+  {
+    src: path.join(ROOT, 'package.json'),
+    dest: path.join(ROOT, 'dist', 'package.json'),
+  },
 ];
 
 for (const { src, dest } of copies) {

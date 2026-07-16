@@ -32,9 +32,16 @@ const _timersMod = 'timers';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { setTimeout: _st } = require(_timersMod) as typeof import('timers');
 
-import { openboxRequest } from '../openbox-client';
+import { openboxRequest, GovernanceAuthError, SoftGovernanceError } from '../openbox-client';
+import { safeString } from './error-info';
+import { GovernanceClient, OnApiError } from './client';
+import type { HITLConfig, Logger } from './config';
 import { rfc3339Now, hexId, GovernanceVerdictResponse } from './types';
-import { GovernanceBlockedError, verdictFromString } from './verdict';
+import { GovernanceBlockedError, GovernanceHaltError, formatActivityRejectedMessage, verdictFromString } from './verdict';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => _st(resolve, ms));
+}
 
 // ── Activity context registry (mirrors WorkflowSpanProcessor._activity_context) ──
 
@@ -50,10 +57,22 @@ interface ActivityContext {
   activity_type: string;
 }
 
+export interface RegisterActivityOptions {
+  hitl: HITLConfig;
+  onApiError: OnApiError;
+  logger: Logger;
+  /** GovernanceConfig.governanceTimeout converted to ms. */
+  requestTimeoutMs: number;
+}
+
 interface ActiveEntry {
   ctx: ActivityContext;
   executeFunctions: IExecuteFunctions;
   traceId: string;
+  hitl: HITLConfig;
+  onApiError: OnApiError;
+  logger: Logger;
+  requestTimeoutMs: number;
 }
 
 // Global registry keyed by activityId — only one entry active at a time per LLM call
@@ -63,8 +82,8 @@ const _activityAbort = new Map<string, string>();
 // verdicts are suppressed for these so one approval covers the full tool execution.
 const _approvedActivities = new Set<string>();
 const _activityScope = new AsyncLocalStorage<string>();
-const _recentHttpSpans = new Map<string, number>();
-const _recentHttpSpanTtlMs = 1000;
+const _recentSpans = new Map<string, number>();
+const _recentSpanTtlMs = 1000;
 
 let _patched = false;
 let _httpModulesPatched = false;
@@ -188,7 +207,7 @@ async function evaluateHookSpan(
   entry: ActiveEntry,
   spanData: Record<string, unknown>,
 ): Promise<void> {
-  if (isDuplicateHttpSpan(entry.ctx.activity_id, spanData)) return;
+  if (isDuplicateSpan(entry.ctx.activity_id, spanData)) return;
   const payload: Record<string, unknown> = {
     ...entry.ctx,
     timestamp: rfc3339Now(),
@@ -201,41 +220,52 @@ async function evaluateHookSpan(
       method: 'POST',
       path: '/api/v1/governance/evaluate',
       body: payload,
-      noRetry: true,
       traceId: entry.traceId,
+      timeoutMs: entry.requestTimeoutMs,
     });
     // Span is always sent to Core so it shows on the dashboard.
     // For already-approved activities, skip verdict enforcement — enforcing would
     // create spurious approval rows. The ToolStarted approval covers the full call.
     if (!_approvedActivities.has(entry.ctx.activity_id)) {
-      handleHookVerdict(response, String(spanData.http_url ?? spanData.name ?? 'hook'), entry.ctx.activity_id);
+      await enforceHookVerdict(entry, response, String(spanData.http_url ?? spanData.name ?? 'hook'));
     }
   } catch (err) {
-    if (err instanceof GovernanceBlockedError) throw err;
-    // fail_open — governance errors must never crash the model call
+    if (err instanceof GovernanceBlockedError || err instanceof GovernanceHaltError) throw err;
+    // Auth/signing failures always hard-fail, regardless of onApiError.
+    if (err instanceof GovernanceAuthError) throw err;
+    // Other soft failures (network/API) respect the configured policy —
+    // default fail_open so governance errors don't crash the model call.
+    if (err instanceof SoftGovernanceError && entry.onApiError === 'fail_closed') throw err;
+    if (!(err instanceof SoftGovernanceError)) {
+      entry.logger.warn('span evaluate failed', err);
+    }
   }
 }
 
-function isDuplicateHttpSpan(activityId: string, spanData: Record<string, unknown>): boolean {
-  if (spanData.hook_type !== 'http_request') return false;
+function isDuplicateSpan(activityId: string, spanData: Record<string, unknown>): boolean {
+  const hookType = spanData.hook_type;
+  if (typeof hookType !== 'string') return false;
   const now = Date.now();
-  for (const [key, seenAt] of _recentHttpSpans) {
-    if (now - seenAt > _recentHttpSpanTtlMs) {
-      _recentHttpSpans.delete(key);
+  for (const [key, seenAt] of _recentSpans) {
+    if (now - seenAt > _recentSpanTtlMs) {
+      _recentSpans.delete(key);
     }
   }
-  const key = [
-    activityId,
-    spanData.stage,
-    spanData.http_method,
-    spanData.http_url,
-    spanData.http_status_code ?? '',
-  ].join('|');
-  const seenAt = _recentHttpSpans.get(key);
-  if (seenAt != null && now - seenAt <= _recentHttpSpanTtlMs) {
+  // Generalized across all hook types (http_request, db_query, file_operation) —
+  // previously only http spans were deduplicated, so file/db spans had no
+  // duplicate-suppression at all.
+  const identity =
+    hookType === 'http_request'
+      ? [spanData.http_method, spanData.http_url, spanData.http_status_code ?? '']
+      : hookType === 'db_query'
+        ? [spanData.db_system, spanData.db_statement, spanData.rowcount ?? '']
+        : [spanData.file_path, spanData.file_operation];
+  const key = [activityId, spanData.stage, hookType, ...identity].join('|');
+  const seenAt = _recentSpans.get(key);
+  if (seenAt != null && now - seenAt <= _recentSpanTtlMs) {
     return true;
   }
-  _recentHttpSpans.set(key, now);
+  _recentSpans.set(key, now);
   return false;
 }
 
@@ -243,9 +273,12 @@ export async function evaluateActivitySpan(
   activityId: string,
   spanData: Record<string, unknown>,
 ): Promise<void> {
+  // _activityAbort is only ever set for a terminal block/halt verdict now (see
+  // enforceHookVerdict below) — require_approval is resolved by polling inline
+  // before it ever reaches this map.
   const abortReason = _activityAbort.get(activityId);
   if (abortReason) {
-    throw new GovernanceBlockedError('require_approval', abortReason);
+    throw new GovernanceBlockedError('halt', abortReason);
   }
   const entry = _activeActivities.get(activityId);
   if (!entry) return;
@@ -256,22 +289,116 @@ export function getCurrentActivityId(): string | undefined {
   return _activityScope.getStore();
 }
 
-function handleHookVerdict(
+/**
+ * Poll Core for approval on a hook-level (span) verdict, blocking until
+ * allowed/rejected/expired. Mirrors pollApprovalOrHalt() but operates on an
+ * ActiveEntry (available inside the fetch/DB patch) instead of the full
+ * OpenBoxLangChainMiddleware instance.
+ *
+ * Polling happens INLINE here — before evaluateHookSpan/enforceHookVerdict
+ * ever throws — so require_approval never surfaces as an exception out of
+ * the patched fetch/query call. This matters because that call runs inside
+ * the LLM/DB client's own retry wrapper (e.g. LangChain's AsyncCaller), which
+ * has no notion of "this error means poll and retry" — it just sees an
+ * unrecognized error and burns through its own retry budget with exponential
+ * backoff, or gives up and surfaces a generic failure, before our HITL logic
+ * ever got a chance to run.
+ */
+/**
+ * Record the resolved reason in the abort side-channel BEFORE throwing, then
+ * return the error to throw. This is the one source of truth for "why was
+ * this activity aborted" that survives no matter how an external HTTP/LLM
+ * client library mangles or replaces the thrown exception on its way out of
+ * a patched fetch/http call — e.g. the OpenAI SDK wraps ANY error its fetch
+ * implementation throws as a generic APIConnectionError with the fixed
+ * message "Connection error.", discarding the real reason. Callers up the
+ * stack should prefer getActivityAbortReason(activityId) over trying to
+ * introspect the caught error itself.
+ */
+function abortAndThrow(activityId: string, message: string): GovernanceHaltError {
+  _activityAbort.set(activityId, message);
+  return new GovernanceHaltError(message);
+}
+
+async function pollHookApproval(
+  entry: ActiveEntry,
+  activityId: string,
+  activityType: string,
+  approvalId?: string,
+): Promise<void> {
+  const { hitl } = entry;
+  if (!hitl.enabled) {
+    throw abortAndThrow(activityId, `Approval required for activity ${activityType}`);
+  }
+
+  const client = new GovernanceClient(entry.executeFunctions, entry.traceId, entry.requestTimeoutMs);
+  const startedAt = Date.now();
+  while (hitl.timeoutMs == null || Date.now() - startedAt <= hitl.timeoutMs) {
+    const response = await client.pollApproval(
+      entry.ctx.workflow_id,
+      entry.ctx.run_id,
+      activityId,
+      approvalId,
+      entry.onApiError,
+    );
+    if (response == null) {
+      await sleep(hitl.pollIntervalMs);
+      continue;
+    }
+
+    if (response.expired) {
+      throw abortAndThrow(
+        activityId,
+        `Approval expired for activity ${activityType} (workflow_id=${entry.ctx.workflow_id}, run_id=${entry.ctx.run_id}, activity_id=${activityId})`,
+      );
+    }
+
+    // No arm/verdict/action field at all means still pending (no human
+    // decision recorded yet) — not "allow". See hitl.ts's pollApprovalOrHalt
+    // for the full explanation; this is the hook-level (fetch/db span) twin
+    // of that same poll loop and had the identical bug.
+    const rawVerdict = response.arm ?? response.verdict ?? response.action;
+    if (typeof rawVerdict !== 'string' || rawVerdict.trim() === '') {
+      await sleep(hitl.pollIntervalMs);
+      continue;
+    }
+
+    const verdict = verdictFromString(rawVerdict);
+
+    if (verdict === 'allow') return;
+    if (verdict === 'block' || verdict === 'halt') {
+      throw abortAndThrow(activityId, formatActivityRejectedMessage(response.reason));
+    }
+
+    await sleep(hitl.pollIntervalMs);
+  }
+
+  throw abortAndThrow(
+    activityId,
+    `Approval timed out for activity ${activityType} (workflow_id=${entry.ctx.workflow_id}, run_id=${entry.ctx.run_id}, activity_id=${activityId})`,
+  );
+}
+
+async function enforceHookVerdict(
+  entry: ActiveEntry,
   response: GovernanceVerdictResponse | null,
   identifier: string,
-  activityId: string,
-): void {
+): Promise<void> {
   if (response == null) return;
+  const activityId = entry.ctx.activity_id;
   const verdict = verdictFromString(response.verdict ?? response.arm ?? response.action);
-  if (verdict === 'block' || verdict === 'halt' || verdict === 'require_approval') {
-    // If already approved at ToolStarted/LLMStarted level, don't re-block on the
-    // HTTP hook event — one approval covers the full tool execution.
-    if (verdict === 'require_approval' && _approvedActivities.has(activityId)) {
-      return;
-    }
-    const reason =
-      response.reason ??
-      (verdict === 'require_approval' ? 'Approval required - blocked at hook level' : 'Blocked by governance');
+
+  if (verdict === 'require_approval') {
+    const approvalId = response.approval_id ?? response.approvalId ?? response.id;
+    await pollHookApproval(entry, activityId, entry.ctx.activity_type, approvalId as string | undefined);
+    // Approved — mark so a subsequent hook span or the ToolCompleted/LLMCompleted
+    // event-level check doesn't ask Core for approval a second time.
+    markActivityApproved(activityId);
+    return;
+  }
+
+  if (verdict === 'block' || verdict === 'halt') {
+    const reason = response.reason ?? 'Blocked by governance';
     _activityAbort.set(activityId, reason);
     throw new GovernanceBlockedError(verdict, `${reason} (${identifier})`);
   }
@@ -299,9 +426,15 @@ function patchFetch(): void {
     if (_activeActivities.size === 0) {
       return captured(input, init);
     }
-    // Resolve activityId early so we can bail before any work if not found.
-    const activityId = _activityScope.getStore() ?? _activeActivities.keys().next().value;
-    if (!activityId || !_activeActivities.has(activityId as string)) {
+    // Resolve activityId from the async-local scope only. Previously this
+    // fell back to "the first key in the global activity map" when the scope
+    // was empty — under concurrent executions in the same process, that could
+    // attribute one execution's HTTP span (and any governance verdict tied to
+    // it) to a completely different execution's activity. Skipping
+    // instrumentation when context is missing (like every other patch here
+    // already does) is the safe behavior.
+    const activityId = _activityScope.getStore();
+    if (!activityId || !_activeActivities.has(activityId)) {
       return captured(input, init);
     }
 
@@ -317,12 +450,14 @@ function patchFetch(): void {
       return captured(input, init);
     }
 
-    const abortReason = _activityAbort.get(activityId as string);
+    // Only ever set for a terminal block/halt verdict now — require_approval is
+    // resolved by polling inline inside evaluateHookSpan before it gets here.
+    const abortReason = _activityAbort.get(activityId);
     if (abortReason) {
-      throw new GovernanceBlockedError('require_approval', abortReason);
+      throw new GovernanceBlockedError('halt', abortReason);
     }
 
-    const entry = _activeActivities.get(activityId as string);
+    const entry = _activeActivities.get(activityId);
     if (!entry) return captured(input, init);
 
     const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
@@ -367,27 +502,15 @@ function patchFetch(): void {
       }
     } catch { /* best effort */ }
 
-    // Evaluate "completed" span (mirrors _patched_async_send).
-    // For 'require_approval' verdicts on the completed span: _activityAbort is
-    // already set by handleHookVerdict so any SUBSEQUENT fetch from this activity
-    // will be blocked before it starts. We must NOT propagate the throw here —
-    // the HTTP call already happened and throwing from patchedFetch for the
-    // completed span causes the error to surface inside tool.invoke(), which
-    // triggers a 5-minute HITL polling wait even though the underlying response
-    // is already available. 'block' and 'halt' verdicts still propagate (those
-    // mean "discard this response immediately").
-    try {
-      await evaluateHookSpan(
-        entry,
-        buildHttpSpanData({ activityId, method, url: urlStr, stage: 'completed', requestBody, responseBody, statusCode: response?.status ?? null, startMs, endMs }),
-      );
-    } catch (err) {
-      if (err instanceof GovernanceBlockedError && err.verdict === 'require_approval') {
-        // _activityAbort is set; next fetch will be blocked. Allow this response through.
-      } else {
-        throw err;
-      }
-    }
+    // Evaluate "completed" span (mirrors _patched_async_send). require_approval
+    // is resolved by polling inline inside evaluateHookSpan — it blocks here
+    // until approved/rejected rather than throwing, so the response is only
+    // ever returned once the verdict is settled. block/halt still throw and
+    // discard this response immediately.
+    await evaluateHookSpan(
+      entry,
+      buildHttpSpanData({ activityId, method, url: urlStr, stage: 'completed', requestBody, responseBody, statusCode: response?.status ?? null, startMs, endMs }),
+    );
 
     return response;
   };
@@ -476,7 +599,7 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
           startMs,
         }),
       ).catch((err) => {
-        req.destroy?.(err instanceof Error ? err : new Error(String(err)));
+        req.destroy?.(err instanceof Error ? err : new Error(safeString(err)));
       });
 
       const originalWrite = req.write;
@@ -509,8 +632,8 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
               startMs,
               endMs,
             }),
-            error: String(err),
-            status: { code: 'ERROR', description: String(err) },
+            error: safeString(err),
+            status: { code: 'ERROR', description: safeString(err) },
           },
         );
       });
@@ -591,9 +714,18 @@ export function registerActivity(
   ctx: ActivityContext,
   executeFunctions: IExecuteFunctions,
   traceId: string,
+  opts: RegisterActivityOptions,
 ): void {
   patchFetch();
-  _activeActivities.set(activityId, { ctx, executeFunctions, traceId });
+  _activeActivities.set(activityId, {
+    ctx,
+    executeFunctions,
+    traceId,
+    hitl: opts.hitl,
+    onApiError: opts.onApiError,
+    logger: opts.logger,
+    requestTimeoutMs: opts.requestTimeoutMs,
+  });
 }
 
 /**
@@ -635,6 +767,16 @@ export function hasActivityAbort(activityId: string): boolean {
 }
 
 /**
+ * The reason recorded for this activity's abort (block/halt, an approval
+ * rejection/expiry/timeout, or HITL-disabled), if any. Prefer this over
+ * trying to introspect a caught error's message/cause chain — see
+ * abortAndThrow's doc comment for why the caught error can't be trusted.
+ */
+export function getActivityAbortReason(activityId: string): string | undefined {
+  return _activityAbort.get(activityId);
+}
+
+/**
  * True when this activity was already approved (at ToolStarted/LLMStarted level).
  * Used to skip HITL at ToolCompleted/LLMCompleted — one approval covers the full call.
  */
@@ -663,6 +805,7 @@ export function unregisterWorkflow(workflowId: string): void {
     if (entry.ctx.workflow_id === workflowId) {
       _activeActivities.delete(activityId);
       _activityAbort.delete(activityId);
+      _approvedActivities.delete(activityId);
     }
   }
 }

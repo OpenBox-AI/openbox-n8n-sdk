@@ -8,6 +8,8 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GuardrailsValidationError = exports.GovernanceBlockedError = exports.GovernanceHaltError = void 0;
+exports.unwrapGovernanceError = unwrapGovernanceError;
+exports.formatActivityRejectedMessage = formatActivityRejectedMessage;
 exports.enforceVerdict = enforceVerdict;
 exports.verdictFromString = verdictFromString;
 class GovernanceHaltError extends Error {
@@ -35,6 +37,51 @@ class GuardrailsValidationError extends Error {
     }
 }
 exports.GuardrailsValidationError = GuardrailsValidationError;
+/**
+ * Recover one of our own governance errors from anywhere in an error's cause
+ * chain. Needed because a GovernanceHaltError/GovernanceBlockedError thrown
+ * *inside* a patched fetch (e.g. when a mid-call HTTP hook evaluation gets
+ * rejected) surfaces to the caller through whatever HTTP client library made
+ * that call — and most Node HTTP clients (the OpenAI SDK included) catch
+ * ANY error their fetch implementation throws and wrap it in a generic
+ * transport error (e.g. `APIConnectionError` with the fixed message
+ * "Connection error."), stashing the real cause in `.cause`. Without
+ * unwrapping, both the error surfaced to the user AND the closure telemetry
+ * sent to Core would show "Connection error." instead of the real reason
+ * (e.g. "Activity rejected: ..."). Mirrors extractGovernanceBlocked's cause-
+ * chain walk but recognizes all three governance error types, not just
+ * GovernanceBlockedError.
+ */
+function unwrapGovernanceError(err) {
+    const seen = new Set();
+    let current = err;
+    while (current != null && !seen.has(current)) {
+        seen.add(current);
+        if (current instanceof GovernanceHaltError ||
+            current instanceof GovernanceBlockedError ||
+            current instanceof GuardrailsValidationError) {
+            return current;
+        }
+        if (typeof current === 'object') {
+            const record = current;
+            current = record.cause ?? record.context;
+        }
+        else {
+            current = null;
+        }
+    }
+    return null;
+}
+/**
+ * Format the "a human rejected this activity" message. Previously each poll
+ * loop built this inline as `Activity rejected: ${response.reason ?? 'Activity
+ * rejected'}`, which — whenever Core didn't send a reason — produced the
+ * redundant "Activity rejected: Activity rejected".
+ */
+function formatActivityRejectedMessage(reason) {
+    const trimmed = typeof reason === 'string' ? reason.trim() : '';
+    return trimmed ? `Activity rejected: ${trimmed}` : 'Activity rejected (no reason provided)';
+}
 /**
  * enforce_verdict(response, phase) — direct port.
  *

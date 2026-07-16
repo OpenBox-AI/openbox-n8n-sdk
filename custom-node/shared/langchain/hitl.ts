@@ -1,5 +1,6 @@
 import type { OpenBoxLangChainMiddleware } from './middleware';
-import { GovernanceHaltError, verdictFromString } from './verdict';
+import type { Turn } from './hooks';
+import { GovernanceHaltError, formatActivityRejectedMessage, verdictFromString } from './verdict';
 
 const _timersMod = 'timers';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -11,6 +12,7 @@ function sleep(ms: number): Promise<void> {
 
 export async function pollApprovalOrHalt(
   mw: OpenBoxLangChainMiddleware,
+  turn: Turn,
   activityId: string,
   activityType: string,
   approvalId?: string,
@@ -19,9 +21,16 @@ export async function pollApprovalOrHalt(
     throw new GovernanceHaltError(`Approval required for activity ${activityType}`);
   }
 
+  const timeoutMs = mw._config.hitl.timeoutMs;
   const startedAt = Date.now();
-  while (Date.now() - startedAt <= mw._config.hitl.timeoutMs) {
-    const response = await mw._client.pollApproval(mw._workflowId, mw._runId, activityId, approvalId);
+  while (timeoutMs == null || Date.now() - startedAt <= timeoutMs) {
+    const response = await mw._client.pollApproval(
+      turn.workflowId,
+      turn.runId,
+      activityId,
+      approvalId,
+      mw._config.onApiError,
+    );
     if (response == null) {
       await sleep(mw._config.hitl.pollIntervalMs);
       continue;
@@ -29,23 +38,34 @@ export async function pollApprovalOrHalt(
 
     if (response.expired) {
       throw new GovernanceHaltError(
-        `Approval expired for activity ${activityType} (workflow_id=${mw._workflowId}, run_id=${mw._runId}, activity_id=${activityId})`,
+        `Approval expired for activity ${activityType} (workflow_id=${turn.workflowId}, run_id=${turn.runId}, activity_id=${activityId})`,
       );
     }
 
-    const verdict = verdictFromString(response.arm ?? response.verdict ?? response.action);
+    // A response body with no arm/verdict/action field at all means Core
+    // hasn't recorded a human decision yet (still pending) — NOT "allow".
+    // verdictFromString(undefined) defaults to 'allow' (the correct default
+    // for the initial governance-evaluate response, where an unset field
+    // means "no restriction stated"), but reusing that default here would
+    // resolve the poll loop on its very first tick, before anyone approved
+    // anything. Only interpret a verdict once Core actually sent one.
+    const rawVerdict = response.arm ?? response.verdict ?? response.action;
+    if (typeof rawVerdict !== 'string' || rawVerdict.trim() === '') {
+      await sleep(mw._config.hitl.pollIntervalMs);
+      continue;
+    }
+
+    const verdict = verdictFromString(rawVerdict);
 
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {
-      throw new GovernanceHaltError(
-        `Activity rejected: ${response.reason ?? 'Activity rejected'}`,
-      );
+      throw new GovernanceHaltError(formatActivityRejectedMessage(response.reason));
     }
 
     await sleep(mw._config.hitl.pollIntervalMs);
   }
 
   throw new GovernanceHaltError(
-    `Approval timed out for activity ${activityType} (workflow_id=${mw._workflowId}, run_id=${mw._runId}, activity_id=${activityId})`,
+    `Approval timed out for activity ${activityType} (workflow_id=${turn.workflowId}, run_id=${turn.runId}, activity_id=${activityId})`,
   );
 }

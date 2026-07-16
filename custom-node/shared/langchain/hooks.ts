@@ -9,10 +9,29 @@
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import { GovernanceVerdictResponse, LangChainGovernanceEvent, rfc3339Now } from './types';
 import { GovernanceBlockedError } from './verdict';
+import { toErrorInfo } from './error-info';
 
 // ── _base_event_fields ────────────────────────────────────────────────────────
 
-export function baseEventFields(mw: OpenBoxLangChainMiddleware): {
+export interface Turn {
+  workflowId: string;
+  runId: string;
+}
+
+/**
+ * Recover the turn identity from an error thrown by beforeAgent(). Governance
+ * failures (block/halt, or a hard API error) can throw before beforeAgent
+ * returns its Turn — the caller still needs workflow_id/run_id to call
+ * afterAgent() and close the workflow, so beforeAgent attaches it to the
+ * error before rethrowing.
+ */
+export function turnFromError(err: unknown): Turn | undefined {
+  if (err == null || typeof err !== 'object') return undefined;
+  const turn = (err as Record<string, unknown>).__obTurn;
+  return turn as Turn | undefined;
+}
+
+export function baseEventFields(mw: OpenBoxLangChainMiddleware, turn: Turn): {
   source: 'workflow-telemetry';
   workflow_id: string;
   run_id: string;
@@ -20,16 +39,45 @@ export function baseEventFields(mw: OpenBoxLangChainMiddleware): {
   task_queue: string;
   timestamp: string;
   session_id: string | undefined;
+  agent_name: string | undefined;
 } {
   return {
     source: 'workflow-telemetry',
-    workflow_id: mw._workflowId,
-    run_id: mw._runId,
+    workflow_id: turn.workflowId,
+    run_id: turn.runId,
     workflow_type: mw._workflowType,
     task_queue: mw._config.taskQueue,
     timestamp: rfc3339Now(),
     session_id: mw._config.sessionId,
+    agent_name: mw._config.agentName ?? mw._workflowType,
   };
+}
+
+/**
+ * Build a governance event. One shared seam instead of ad hoc object literals
+ * at every call site — `fields` carries whatever is specific to this event
+ * type/call (activity_input, prompt, tool_name, error, ...), applied last so
+ * a caller can always override a base field if it genuinely needs to.
+ */
+export function buildEvent(
+  mw: OpenBoxLangChainMiddleware,
+  turn: Turn,
+  eventType: string,
+  activityId: string,
+  activityType: string,
+  // Partial<LangChainGovernanceEvent> (not Record<string, unknown>) so that,
+  // e.g., `error: someBareString` fails to compile here the same way it
+  // would in a direct object literal — a plain Record<string, unknown> would
+  // let a bare string slip past the ErrorInfo typing via this parameter.
+  fields: Partial<LangChainGovernanceEvent> = {},
+): LangChainGovernanceEvent {
+  return {
+    ...baseEventFields(mw, turn),
+    event_type: eventType,
+    activity_id: activityId,
+    activity_type: activityType,
+    ...fields,
+  } as LangChainGovernanceEvent;
 }
 
 // ── _evaluate ─────────────────────────────────────────────────────────────────
@@ -38,7 +86,31 @@ export async function evaluate(
   mw: OpenBoxLangChainMiddleware,
   event: LangChainGovernanceEvent,
 ): Promise<GovernanceVerdictResponse | null> {
-  return mw._client.evaluateEvent(event);
+  return mw._client.evaluateEvent(event, mw._config.onApiError);
+}
+
+/**
+ * Close an orphaned activity row (a start event with no matching completion)
+ * with a failed ActivityCompleted, using the SAME activity id, before the
+ * caller rethrows a gate-enforcement error. Best-effort — a failure here must
+ * never mask the original governance error.
+ */
+export async function sendOrphanClosure(
+  mw: OpenBoxLangChainMiddleware,
+  turn: Turn,
+  completedEventType: 'ActivityCompleted' | 'LLMCompleted' | 'ToolCompleted',
+  activityId: string,
+  activityType: string,
+  err: unknown,
+): Promise<void> {
+  try {
+    await evaluate(mw, buildEvent(mw, turn, completedEventType, activityId, activityType, {
+      status: 'failed',
+      error: toErrorInfo(err),
+    }));
+  } catch {
+    // non-fatal — closure telemetry must not mask the original error
+  }
 }
 
 // ── _extract_governance_blocked ──────────────────────────────────────────────
@@ -59,6 +131,51 @@ export function extractGovernanceBlocked(err: unknown): GovernanceBlockedError |
   return null;
 }
 
+// ── message role / shape helpers ──────────────────────────────────────────────
+
+/**
+ * Resolve a message's role. Tries a real LangChain message instance's
+ * `.getType()` method first (HumanMessage/AIMessage/ToolMessage etc. — the
+ * shape produced by model.invoke()/ToolMessage construction in the n8n node),
+ * then falls back to a plain `.type`/`.role` property for tuple/dict messages.
+ */
+function messageRole(msg: unknown): unknown {
+  if (Array.isArray(msg) && msg.length === 2) return msg[0];
+  if (msg !== null && typeof msg === 'object') {
+    const m = msg as Record<string, unknown>;
+    if (typeof m.getType === 'function') {
+      try {
+        return (m.getType as () => unknown).call(m);
+      } catch {
+        // fall through to property access
+      }
+    }
+    return m.type ?? m.role;
+  }
+  return null;
+}
+
+function messageContent(msg: unknown): unknown {
+  if (Array.isArray(msg) && msg.length === 2) return msg[1];
+  if (msg !== null && typeof msg === 'object') return (msg as Record<string, unknown>).content;
+  return null;
+}
+
+/**
+ * True whenever there is a human/user/generic turn at all, independent of
+ * whether the extracted text is empty or the content is multimodal. Used to
+ * make sure an empty/non-text turn is still governed rather than silently
+ * skipped. Role set matches extractLastUserMessage/appendHumanContent/
+ * applyPiiRedaction — keep these consistent.
+ */
+export function hasHumanTurn(messages: unknown[]): boolean {
+  if (!Array.isArray(messages)) return false;
+  return messages.some((msg) => {
+    const role = messageRole(msg);
+    return role === 'human' || role === 'user' || role === 'generic';
+  });
+}
+
 // ── _extract_last_user_message ────────────────────────────────────────────────
 
 /**
@@ -68,17 +185,10 @@ export function extractGovernanceBlocked(err: unknown): GovernanceBlockedError |
 export function extractLastUserMessage(messages: unknown[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (Array.isArray(msg) && msg.length === 2) {
-      if (msg[0] === 'user' || msg[0] === 'human') {
-        return typeof msg[1] === 'string' ? msg[1] : null;
-      }
-    } else if (msg !== null && typeof msg === 'object') {
-      const m = msg as Record<string, unknown>;
-      const role = m.type ?? m.role;
-      if (role === 'human' || role === 'user') {
-        const content = m.content;
-        return typeof content === 'string' ? content : null;
-      }
+    const role = messageRole(msg);
+    if (role === 'human' || role === 'user' || role === 'generic') {
+      const content = messageContent(msg);
+      return typeof content === 'string' ? content : null;
     }
   }
   return null;
@@ -96,20 +206,10 @@ export function extractPromptFromMessages(messages: unknown[]): string {
 }
 
 function appendHumanContent(msg: unknown, parts: string[]): void {
-  let role: unknown = null;
-  let content: unknown = null;
-
-  if (Array.isArray(msg) && msg.length === 2) {
-    role = msg[0];
-    content = msg[1];
-  } else if (msg !== null && typeof msg === 'object') {
-    const m = msg as Record<string, unknown>;
-    role = m.type ?? m.role;
-    content = m.content;
-  }
-
+  const role = messageRole(msg);
   if (role !== 'human' && role !== 'user' && role !== 'generic') return;
 
+  const content = messageContent(msg);
   if (typeof content === 'string') {
     parts.push(content);
   } else if (Array.isArray(content)) {
@@ -128,38 +228,74 @@ function appendHumanContent(msg: unknown, parts: string[]): void {
 // ── _apply_pii_redaction ──────────────────────────────────────────────────────
 
 /**
- * Mutate the last human message in messages with the redacted text returned
- * by Core's guardrails. Mirrors Python SDK's _apply_pii_redaction exactly.
+ * Coerce Core's redacted-input payload to plain text. Accepts a bare string,
+ * or an array whose first element is a string or an object carrying
+ * `.prompt` or `.text` (Core has used both shapes historically).
  */
-export function applyPiiRedaction(messages: unknown[], redactedInput: unknown): void {
-  let redactedText: string | null = null;
-
+function coerceRedactedText(redactedInput: unknown): string | null {
+  if (typeof redactedInput === 'string') return redactedInput || null;
   if (Array.isArray(redactedInput) && redactedInput.length > 0) {
     const first = redactedInput[0];
+    if (typeof first === 'string') return first || null;
     if (typeof first === 'object' && first !== null) {
-      redactedText = (first as Record<string, string>).prompt ?? null;
-    } else if (typeof first === 'string') {
-      redactedText = first;
+      const rec = first as Record<string, unknown>;
+      const text = rec.prompt ?? rec.text;
+      return typeof text === 'string' && text ? text : null;
     }
-  } else if (typeof redactedInput === 'string') {
-    redactedText = redactedInput;
   }
+  return null;
+}
 
+/**
+ * Apply the redacted text to message content. For multimodal array content,
+ * only the text blocks are replaced — non-text blocks (images, etc.) are left
+ * untouched rather than the whole content array being discarded.
+ */
+function redactContent(content: unknown, redactedText: string): unknown {
+  if (typeof content === 'string') return redactedText;
+  if (Array.isArray(content)) {
+    let replaced = false;
+    return content.map((part) => {
+      if (typeof part === 'object' && part !== null && (part as Record<string, unknown>).type === 'text') {
+        const block = part as Record<string, unknown>;
+        if (!replaced) {
+          replaced = true;
+          return { ...block, text: redactedText };
+        }
+        return { ...block, text: '' };
+      }
+      return part;
+    });
+  }
+  return redactedText;
+}
+
+/**
+ * Mutate the last human message in messages with the redacted text returned
+ * by Core's guardrails. Mutates in place (rather than returning a copy)
+ * because `messages` is the same array reference the caller's model-invoke
+ * closure already captured — mutating elements is required for the redaction
+ * to actually reach the model call in this architecture.
+ */
+export function applyPiiRedaction(messages: unknown[], redactedInput: unknown): void {
+  const redactedText = coerceRedactedText(redactedInput);
   if (!redactedText) return;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (Array.isArray(msg) && msg.length === 2 && (msg[0] === 'human' || msg[0] === 'user')) {
-      messages[i] = [msg[0], redactedText];
+    const role = messageRole(msg);
+    if (role !== 'human' && role !== 'user' && role !== 'generic') continue;
+
+    if (Array.isArray(msg) && msg.length === 2) {
+      messages[i] = [msg[0], redactContent(msg[1], redactedText)];
       return;
     }
-    if (msg !== null && typeof msg === 'object') {
-      const m = msg as Record<string, unknown>;
-      const role = m.type ?? m.role;
-      if ((role === 'human' || role === 'user' || role === 'generic') && 'content' in m) {
-        m.content = redactedText;
-        return;
-      }
+    if (msg !== null && typeof msg === 'object' && 'content' in (msg as object)) {
+      (msg as Record<string, unknown>).content = redactContent(
+        (msg as Record<string, unknown>).content,
+        redactedText,
+      );
+      return;
     }
   }
 }
@@ -239,54 +375,64 @@ export function serializeResponseToOpenAiBody(response: unknown): string {
 // ── _extract_response_metadata ────────────────────────────────────────────────
 
 export interface ResponseMetadata {
-  llm_model?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-  total_tokens?: number;
-  has_tool_calls?: boolean;
-  completion?: string;
+  llm_model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  has_tool_calls: boolean;
+  completion: string | null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /**
  * Extract token counts, model name, and completion text from a LangChain
  * AIMessage. Mirrors _extract_response_metadata in middleware_hooks.py.
+ * Missing values are explicit `null` (present key) rather than an absent
+ * key, so the field always survives serialization.
  */
 export function extractResponseMetadata(response: unknown): ResponseMetadata {
-  const result: ResponseMetadata = {};
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let aiMsg: any = response;
   if (aiMsg?.message != null) aiMsg = aiMsg.message;
 
-  if (aiMsg?.response_metadata) {
-    const meta = aiMsg.response_metadata as Record<string, unknown>;
-    const model = meta.model_name ?? meta.model;
-    if (typeof model === 'string') result.llm_model = model;
-  }
+  const meta = (aiMsg?.response_metadata ?? {}) as Record<string, unknown>;
+  const modelName = meta.model_name ?? meta.model;
+  const llm_model = typeof modelName === 'string' ? modelName : null;
 
   const usage = (aiMsg?.usage_metadata ?? {}) as Record<string, unknown>;
-  const inp = (usage.input_tokens ?? usage.prompt_tokens) as number | undefined;
-  const out = (usage.output_tokens ?? usage.completion_tokens) as number | undefined;
-  result.input_tokens = inp;
-  result.output_tokens = out;
-  result.total_tokens =
-    inp != null || out != null ? (inp ?? 0) + (out ?? 0) : undefined;
+  const input_tokens = asFiniteNumber(usage.input_tokens ?? usage.prompt_tokens);
+  const output_tokens = asFiniteNumber(usage.output_tokens ?? usage.completion_tokens);
+  const total_tokens =
+    input_tokens != null || output_tokens != null
+      ? (input_tokens ?? 0) + (output_tokens ?? 0)
+      : null;
 
   const content = aiMsg?.content;
+  let completion: string | null = null;
   if (typeof content === 'string') {
-    result.completion = content || undefined;
+    completion = content;
   } else if (Array.isArray(content)) {
     const parts = (content as unknown[])
       .filter(
         (p): p is Record<string, unknown> =>
           typeof p === 'object' && p !== null &&
-          (p as Record<string, unknown>).type === 'text',
+          (p as Record<string, unknown>).type === 'text' &&
+          typeof (p as Record<string, unknown>).text === 'string' &&
+          ((p as Record<string, unknown>).text as string).length > 0,
       )
-      .map((p) => String(p.text ?? ''));
-    const joined = parts.join(' ');
-    result.completion = joined || undefined;
+      .map((p) => String(p.text));
+    completion = parts.length > 0 ? parts.join(' ') : null;
   }
 
-  result.has_tool_calls = Boolean(aiMsg?.tool_calls?.length);
-  return result;
+  return {
+    llm_model,
+    input_tokens,
+    output_tokens,
+    total_tokens,
+    has_tool_calls: Boolean(aiMsg?.tool_calls?.length),
+    completion,
+  };
 }

@@ -33,6 +33,56 @@ export class GuardrailsValidationError extends Error {
   }
 }
 
+export type GovernanceError = GovernanceHaltError | GovernanceBlockedError | GuardrailsValidationError;
+
+/**
+ * Recover one of our own governance errors from anywhere in an error's cause
+ * chain. Needed because a GovernanceHaltError/GovernanceBlockedError thrown
+ * *inside* a patched fetch (e.g. when a mid-call HTTP hook evaluation gets
+ * rejected) surfaces to the caller through whatever HTTP client library made
+ * that call — and most Node HTTP clients (the OpenAI SDK included) catch
+ * ANY error their fetch implementation throws and wrap it in a generic
+ * transport error (e.g. `APIConnectionError` with the fixed message
+ * "Connection error."), stashing the real cause in `.cause`. Without
+ * unwrapping, both the error surfaced to the user AND the closure telemetry
+ * sent to Core would show "Connection error." instead of the real reason
+ * (e.g. "Activity rejected: ..."). Mirrors extractGovernanceBlocked's cause-
+ * chain walk but recognizes all three governance error types, not just
+ * GovernanceBlockedError.
+ */
+export function unwrapGovernanceError(err: unknown): GovernanceError | null {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && !seen.has(current)) {
+    seen.add(current);
+    if (
+      current instanceof GovernanceHaltError ||
+      current instanceof GovernanceBlockedError ||
+      current instanceof GuardrailsValidationError
+    ) {
+      return current;
+    }
+    if (typeof current === 'object') {
+      const record = current as Record<string, unknown>;
+      current = record.cause ?? record.context;
+    } else {
+      current = null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Format the "a human rejected this activity" message. Previously each poll
+ * loop built this inline as `Activity rejected: ${response.reason ?? 'Activity
+ * rejected'}`, which — whenever Core didn't send a reason — produced the
+ * redundant "Activity rejected: Activity rejected".
+ */
+export function formatActivityRejectedMessage(reason?: string | null): string {
+  const trimmed = typeof reason === 'string' ? reason.trim() : '';
+  return trimmed ? `Activity rejected: ${trimmed}` : 'Activity rejected (no reason provided)';
+}
+
 export interface VerdictResult {
   /** True when arm === 'require_approval' and the caller should poll. */
   requiresHitl: boolean;
