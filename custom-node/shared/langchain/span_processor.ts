@@ -553,14 +553,56 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
           statusCode?: number;
           headers?: Record<string, unknown>;
           on?: (event: string, cb: (...cbArgs: unknown[]) => void) => unknown;
+          once?: (event: string, cb: (...cbArgs: unknown[]) => void) => unknown;
+          off?: (event: string, cb: (...cbArgs: unknown[]) => void) => unknown;
+          emit?: (event: string, ...emitArgs: unknown[]) => unknown;
         }) => {
           const responseChunks: Buffer[] = [];
-          response.on?.('data', (chunk: unknown) => captureHttpBodyChunk(responseChunks, chunk));
-          response.on?.('end', () => {
+          // Kept separately from responseChunks (which is only ever read as
+          // text for the span) so the bytes handed back to the real consumer
+          // are exactly the ones that arrived, whatever their encoding.
+          const replayChunks: unknown[] = [];
+
+          const onData = (chunk: unknown) => {
+            captureHttpBodyChunk(responseChunks, chunk);
+            replayChunks.push(chunk);
+          };
+
+          // Attaching a 'data' listener puts the response into flowing mode,
+          // so by the time the governance verdict settles below the stream is
+          // already drained AND ended. Handing that exhausted object straight
+          // to the caller means its own 'data'/'end' listeners — attached one
+          // tick too late — never fire, and the request hangs until the
+          // caller's timeout (n8n's HTTP nodes sit on axios, which is exactly
+          // this shape: "Response body timed out ... without data"). So detach
+          // our listener and replay the buffered body once the caller has had
+          // a chance to subscribe. Object identity is preserved deliberately —
+          // substituting a PassThrough would drop IncomingMessage fields that
+          // consumers read off the response.
+          const replayTo = (target: typeof response) => {
+            target.off?.('data', onData);
+            originalCallback(target);
+            // setImmediate, not sync: the caller subscribes inside the
+            // callback above, and must be listening before anything is emitted.
+            setImmediate(() => {
+              for (const chunk of replayChunks) target.emit?.('data', chunk);
+              target.emit?.('end');
+            });
+          };
+
+          response.on?.('data', onData);
+          // `once` — the replayed 'end' below must not re-enter this handler.
+          response.once?.('end', () => {
             const endMs = Date.now();
             const requestBody = chunksToText(reqBodyChunks);
             const responseBody = chunksToText(responseChunks);
-            void evaluateHookSpan(
+            // Governance is the gate for handing the response to the caller — mirrors
+            // patchFetch's "completed" check, where the response is only ever returned
+            // once the verdict is settled. This used to be `void evaluateHookSpan(...)`
+            // while `originalCallback(response)` ran unconditionally right after, so a
+            // require_approval verdict resolved against a response the caller had
+            // already consumed — a human decision made later had nothing left to affect.
+            evaluateHookSpan(
               entry,
               buildHttpSpanData({
                 activityId,
@@ -573,9 +615,13 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
                 startMs,
                 endMs,
               }),
+            ).then(
+              () => replayTo(response),
+              (err) => {
+                req.destroy?.(err instanceof Error ? err : new Error(safeString(err)));
+              },
             );
           });
-          originalCallback(response);
         };
       }
 
@@ -584,6 +630,31 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
         end?: (...endArgs: unknown[]) => unknown;
         destroy?: (err?: Error) => unknown;
         on?: (event: string, cb: (...cbArgs: unknown[]) => void) => unknown;
+      };
+
+      // "started" gate — delays flushing the request body until the pre-flight
+      // governance check resolves, mirroring patchFetch's `await evaluateHookSpan(...)`
+      // before `await captured(...)`. write()/end() are synchronous APIs on
+      // http.ClientRequest, so instead of blocking them directly we buffer whatever
+      // the caller writes and replay it once the gate clears — a block/halt verdict
+      // drops the buffered body and destroys the request instead of ever putting it
+      // on the wire.
+      let gateSettled = false;
+      let gateError: Error | null = null;
+      const pendingWrites: Array<{ end: boolean; writeArgs: unknown[] }> = [];
+
+      const originalWrite = req.write;
+      const originalEnd = req.end;
+
+      const flushPendingWrites = () => {
+        for (const pending of pendingWrites) {
+          if (pending.end) {
+            if (typeof originalEnd === 'function') Reflect.apply(originalEnd, req, pending.writeArgs);
+          } else if (typeof originalWrite === 'function') {
+            Reflect.apply(originalWrite, req, pending.writeArgs);
+          }
+        }
+        pendingWrites.length = 0;
       };
 
       void evaluateHookSpan(
@@ -598,21 +669,38 @@ function patchHttpModule(moduleName: 'node:http' | 'node:https'): boolean {
           statusCode: null,
           startMs,
         }),
-      ).catch((err) => {
-        req.destroy?.(err instanceof Error ? err : new Error(safeString(err)));
-      });
+      ).then(
+        () => {
+          gateSettled = true;
+          flushPendingWrites();
+        },
+        (err) => {
+          gateSettled = true;
+          gateError = err instanceof Error ? err : new Error(safeString(err));
+          pendingWrites.length = 0;
+          req.destroy?.(gateError);
+        },
+      );
 
-      const originalWrite = req.write;
       if (typeof originalWrite === 'function') {
         req.write = function patchedWrite(...writeArgs: unknown[]) {
           captureHttpBodyChunk(reqBodyChunks, writeArgs[0]);
+          if (!gateSettled) {
+            pendingWrites.push({ end: false, writeArgs });
+            return true;
+          }
+          if (gateError) return false;
           return Reflect.apply(originalWrite, this, writeArgs);
         };
       }
-      const originalEnd = req.end;
       if (typeof originalEnd === 'function') {
         req.end = function patchedEnd(...endArgs: unknown[]) {
           captureHttpBodyChunk(reqBodyChunks, endArgs[0]);
+          if (!gateSettled) {
+            pendingWrites.push({ end: true, writeArgs: endArgs });
+            return req;
+          }
+          if (gateError) return req;
           return Reflect.apply(originalEnd, this, endArgs);
         };
       }
@@ -682,9 +770,17 @@ function extractHttpUrl(moduleName: 'node:http' | 'node:https', args: unknown[])
     const candidate = args.find((arg) => arg && typeof arg === 'object' && ('hostname' in arg || 'host' in arg || 'path' in arg));
     if (candidate && typeof candidate === 'object') {
       const o = candidate as Record<string, unknown>;
-      const host = String(o.hostname ?? o.host ?? 'unknown');
+      // `hostname` never carries the port, `host` may. Reattach an explicit
+      // port when the resolved authority lacks one, otherwise a self-hosted
+      // OpenBox Core on a non-default port (http://host:9902) reconstructs as
+      // http://host/... and stops matching its own ignored-URL prefix — so
+      // the governance client's calls to Core get instrumented as hook spans
+      // and posted back to Core, which loops.
+      let authority = String(o.hostname ?? o.host ?? 'unknown');
+      const port = o.port == null || o.port === '' ? '' : String(o.port);
+      if (port && !authority.includes(':')) authority = `${authority}:${port}`;
       const path = String(o.path ?? '/');
-      return `${String(o.protocol ?? protocol)}//${host}${path}`;
+      return `${String(o.protocol ?? protocol)}//${authority}${path}`;
     }
   } catch {
     // best effort

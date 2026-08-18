@@ -1,0 +1,125 @@
+/**
+ * Regression guard for the HTTP instrumentation hang.
+ *
+ * The instrumentation attaches a 'data' listener to capture the response body
+ * for its governance span, which puts the stream into flowing mode. Because the
+ * caller's callback is deliberately deferred until the governance verdict
+ * settles, the caller used to receive an already-drained, already-ended stream:
+ * its own 'data'/'end' listeners never fired and the request hung until the
+ * caller's own timeout. n8n's HTTP nodes sit on axios, which is exactly that
+ * shape — every HTTP-backed tool hung for 300s.
+ *
+ * These tests run against a REAL http server through a REAL http.request, so
+ * they exercise the actual patched module rather than a mock of it.
+ */
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import * as http from 'node:http';
+import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
+
+// The instrumentation patches the CJS module object via require('node:http').
+// An ESM namespace import snapshots `request`, so calling http.request here
+// would silently bypass the patch and the test would pass either way — go
+// through the same object the patch mutates.
+const requireCjs = createRequire(import.meta.url);
+
+import {
+  setupSpanProcessorInstrumentation,
+  registerActivity,
+  unregisterActivity,
+  runWithActivity,
+} from '../shared/langchain/span_processor';
+
+let server: http.Server;
+let port: number;
+
+const BODY = JSON.stringify({ city: 'London', temp_c: 14 });
+
+beforeAll(async () => {
+  server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    // Split across two writes so a partial replay would be visible.
+    res.write(BODY.slice(0, 10));
+    res.end(BODY.slice(10));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  port = (server.address() as AddressInfo).port;
+  setupSpanProcessorInstrumentation({ http: true });
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+/** Consume a response the way axios does: subscribe inside the callback. */
+function get(path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const httpCjs = requireCjs('node:http') as typeof http;
+    const req = httpCjs.request(
+      { hostname: '127.0.0.1', port, path, method: 'GET' },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** Fails the test rather than hanging the suite if the body never arrives. */
+function withTimeout<T>(p: Promise<T>, ms = 5000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) =>
+      setTimeout(() => rej(new Error(`timed out after ${ms}ms — response body never delivered`)), ms),
+    ),
+  ]);
+}
+
+describe('HTTP instrumentation body replay', () => {
+  it('delivers the full body to the caller when NO activity is registered (fast path)', async () => {
+    const res = await withTimeout(get('/plain'));
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(BODY);
+  });
+
+  it('delivers the full body to the caller while an activity IS registered', async () => {
+    // This is the case that hung: instrumentation active, so the response is
+    // captured for a span and the callback is gated on the verdict.
+    const activityId = 'act-replay-1';
+    registerActivity(
+      activityId,
+      {
+        source: 'workflow-telemetry',
+        workflow_id: 'wf-1',
+        run_id: 'run-1',
+        workflow_type: 'test',
+        task_queue: 'test',
+        session_id: 'sess-1',
+        event_type: 'ActivityStarted',
+        activity_id: activityId,
+        activity_type: 'test_tool',
+      } as never,
+      // evaluateHookSpan fails open when it cannot reach Core — which is the
+      // point: even with governance unreachable, the body must still arrive.
+      { getNode: () => ({ name: 'test' }) } as never,
+      'trace-1',
+      {
+        hitl: { enabled: false, pollIntervalMs: 1000, timeoutMs: 1000 },
+        onApiError: 'fail_open',
+        logger: { debug() {}, info() {}, warn() {}, error() {} },
+        requestTimeoutMs: 2000,
+      } as never,
+    );
+
+    try {
+      const res = await runWithActivity(activityId, () => withTimeout(get('/governed')));
+      expect(res.status).toBe(200);
+      expect(res.body).toBe(BODY);
+    } finally {
+      unregisterActivity(activityId);
+    }
+  });
+});
