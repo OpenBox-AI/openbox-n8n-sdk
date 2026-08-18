@@ -222,7 +222,7 @@ async function handleWrapModelCall(mw, turn, messages, handler) {
         llmWasApproved = (0, span_processor_1.isActivityApproved)(activityId);
     }
     finally {
-        (0, span_processor_1.unregisterActivity)(activityId);
+        await (0, span_processor_1.unregisterActivity)(activityId);
     }
     const endMs = Date.now();
     const duration_ms = endMs - startMs;
@@ -326,7 +326,7 @@ async function handleWrapMemoryOp(mw, turn, opType, fn) {
         throw failure;
     }
     finally {
-        (0, span_processor_1.unregisterActivity)(activityId);
+        await (0, span_processor_1.unregisterActivity)(activityId);
         const completedEvent = (0, hooks_1.buildEvent)(mw, turn, 'ActivityCompleted', activityId, opType, {
             status,
             duration_ms: Date.now() - startMs,

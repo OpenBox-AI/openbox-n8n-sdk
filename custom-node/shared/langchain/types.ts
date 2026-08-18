@@ -168,6 +168,20 @@ function toJsonSafeInner(value: unknown, seen: WeakSet<object>): unknown {
   }
 }
 
+/**
+ * Deterministic 16-char hex span id derived from a seed.
+ *
+ * The started and completed halves of one operation MUST carry the same
+ * span_id: OpenBox Core creates the span row from the started hook and expects
+ * the completed hook to fill in duration/end_time, correlating them by span_id.
+ * A random id per stage leaves every span showing "started" with no duration.
+ */
+export function stableSpanId(seed: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { createHash } = require('crypto') as typeof import('crypto');
+  return createHash('sha256').update(seed).digest('hex').slice(0, 16);
+}
+
 /** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 export function hexId(len: number = 32): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports

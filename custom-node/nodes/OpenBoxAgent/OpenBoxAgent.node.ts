@@ -300,6 +300,34 @@ export function emitStreamChunks(
   ctx.sendChunk('end', itemIndex);
 }
 
+// ── Chat model retrieval ─────────────────────────────────────────────────────
+/**
+ * Resolve the Nth connected chat model, matching n8n's own `getChatModel()`
+ * (@n8n/n8n-nodes-langchain ToolsAgent/common.ts).
+ *
+ * The port index is NOT how n8n hands over multiple language models. When more
+ * than one `ai_languageModel` connection exists — which is exactly what
+ * `needsFallback` creates — `getInputConnectionData(AiLanguageModel, 0)`
+ * returns an ARRAY of every connected model, in reverse port order, and the
+ * caller indexes into it after reversing. Passing an inputIndex instead (as we
+ * did) yields that whole array, so `model.bindTools` is undefined and the node
+ * dies with "model.bindTools is not a function" the moment a fallback model is
+ * connected. A single connection still returns the model itself, which is why
+ * the single-model case worked.
+ */
+export async function resolveChatModel(
+  ctx: Pick<IExecuteFunctions, 'getInputConnectionData'>,
+  index: number,
+): Promise<unknown> {
+  const connected = await ctx.getInputConnectionData(NodeConnectionTypes.AiLanguageModel, 0);
+  if (Array.isArray(connected)) {
+    if (connected.length <= index) return null;
+    return [...connected].reverse()[index] ?? null;
+  }
+  // Single connection: n8n returns the model directly, so only index 0 exists.
+  return index === 0 ? (connected ?? null) : null;
+}
+
 // ── Node ──────────────────────────────────────────────────────────────────────
 
 export class OpenBoxAgent implements INodeType {
@@ -570,78 +598,7 @@ export class OpenBoxAgent implements INodeType {
     let continueOnFail = false;
     try { continueOnFail = this.continueOnFail(); } catch { /* not available in all contexts */ }
 
-    // ── Retrieve connected sub-nodes ─────────────────────────────────────────
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const model = (await this.getInputConnectionData(NodeConnectionTypes.AiLanguageModel, 0, 0)) as any;
-    // Flattened, because an ai_tool connection may be a Toolkit supplying many
-    // tools (MCP / Composio) rather than a single tool — see
-    // flattenConnectedTools above.
-    const rawToolConnection = await this.getInputConnectionData(NodeConnectionTypes.AiTool, 0);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const tools = flattenConnectedTools(rawToolConnection) as any[];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const memory = ((await this.getInputConnectionData(NodeConnectionTypes.AiMemory, 0)) as any) ?? null;
-
-    if (!model) {
-      throw new NodeOperationError(
-        this.getNode(),
-        'No Chat Model connected. Drag a language model sub-node (e.g. "OpenAI Chat Model") into the Chat Model input.',
-      );
-    }
-
-    // needsFallback drives the second AiLanguageModel port added by
-    // getOpenBoxAgentInputs above — inputIndex 1, matching n8n's own
-    // official Agent node convention.
-    const needsFallback = this.getNodeParameter('needsFallback', 0, false) as boolean;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let fallbackModel: any = null;
-    if (needsFallback) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      fallbackModel = (await this.getInputConnectionData(NodeConnectionTypes.AiLanguageModel, 0, 1)) as any;
-      if (!fallbackModel) {
-        throw new NodeOperationError(
-          this.getNode(),
-          'Please connect a model to the Fallback Model input or disable the fallback option.',
-        );
-      }
-    }
-
-    const options = this.getNodeParameter('options', 0, {}) as {
-      systemMessage?: string;
-      maxIterations?: number;
-      returnIntermediateSteps?: boolean;
-      passthroughBinaryImages?: boolean;
-      enableStreaming?: boolean;
-      onToolError?: 'returnToModel' | 'stopAgent';
-    };
-    const systemMessage = options.systemMessage ?? 'You are a helpful assistant';
-    const maxIterations = options.maxIterations ?? 10;
-    const returnIntermediateSteps = options.returnIntermediateSteps ?? false;
-    // Default matches n8n's official Agent node: a failing tool is reported
-    // back to the model rather than ending the run.
-    const onToolError = options.onToolError ?? 'returnToModel';
-    // isStreaming() reflects whether the actual webhook/trigger is running in
-    // streaming response mode this execution — enableStreaming is this node's
-    // own opt-in on top of that, matching the official Agent node's gating.
-    // typeof-guarded since this API may not exist on older installed n8n.
-    const streamingRequested =
-      (options.enableStreaming ?? false) &&
-      typeof this.isStreaming === 'function' &&
-      this.isStreaming() &&
-      typeof this.sendChunk === 'function';
-    const promptType = this.getNodeParameter('promptType', 0, 'auto') as string;
     const workflowType = `n8n.Agent.${this.getNode().name.replace(/\s+/g, '_')}`;
-
-    // Bind tools to model(s) once (immutable across items)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundModel: any = tools.length > 0 ? model.bindTools(tools) : model;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const boundFallbackModel: any = fallbackModel
-      ? tools.length > 0
-        ? fallbackModel.bindTools(tools)
-        : fallbackModel
-      : null;
-
     // ── Advanced Governance options → middleware config ──────────────────────
     const governance = this.getNodeParameter('governance', 0, {}) as {
       eventsToSend?: string[];
@@ -693,8 +650,89 @@ export class OpenBoxAgent implements INodeType {
         : new Set(),
     };
 
-    // ── Build middleware (one instance per execute() call, reset per item) ───
+    // ── Build middleware FIRST ───────────────────────────────────────────────
+    // Constructing it installs the fetch/http/db instrumentation, and that has
+    // to happen BEFORE any sub-node is retrieved. Retrieving an
+    // ai_languageModel connection constructs the provider client, and the
+    // OpenAI SDK (which the OpenRouter/OpenAI chat nodes sit on) resolves its
+    // transport once, in its constructor: `this.fetch = options.fetch ??
+    // getDefaultFetch()`. Patching the global fetch after that point leaves the
+    // client holding the original, so every LLM call went uninstrumented and
+    // llm_call activities carried no spans at all — while tool HTTP, which goes
+    // through node:http, was captured normally.
     const middleware = new OpenBoxLangChainMiddleware(middlewareOptions, this);
+
+    // ── Retrieve connected sub-nodes ─────────────────────────────────────────
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const model = (await resolveChatModel(this, 0)) as any;
+    // Flattened, because an ai_tool connection may be a Toolkit supplying many
+    // tools (MCP / Composio) rather than a single tool — see
+    // flattenConnectedTools above.
+    const rawToolConnection = await this.getInputConnectionData(NodeConnectionTypes.AiTool, 0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tools = flattenConnectedTools(rawToolConnection) as any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const memory = ((await this.getInputConnectionData(NodeConnectionTypes.AiMemory, 0)) as any) ?? null;
+
+    if (!model) {
+      throw new NodeOperationError(
+        this.getNode(),
+        'No Chat Model connected. Drag a language model sub-node (e.g. "OpenAI Chat Model") into the Chat Model input.',
+      );
+    }
+
+    // needsFallback drives the second AiLanguageModel port added by
+    // getOpenBoxAgentInputs above — inputIndex 1, matching n8n's own
+    // official Agent node convention.
+    const needsFallback = this.getNodeParameter('needsFallback', 0, false) as boolean;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let fallbackModel: any = null;
+    if (needsFallback) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fallbackModel = (await resolveChatModel(this, 1)) as any;
+      if (!fallbackModel) {
+        throw new NodeOperationError(
+          this.getNode(),
+          'Please connect a model to the Fallback Model input or disable the fallback option.',
+        );
+      }
+    }
+
+    const options = this.getNodeParameter('options', 0, {}) as {
+      systemMessage?: string;
+      maxIterations?: number;
+      returnIntermediateSteps?: boolean;
+      passthroughBinaryImages?: boolean;
+      enableStreaming?: boolean;
+      onToolError?: 'returnToModel' | 'stopAgent';
+    };
+    const systemMessage = options.systemMessage ?? 'You are a helpful assistant';
+    const maxIterations = options.maxIterations ?? 10;
+    const returnIntermediateSteps = options.returnIntermediateSteps ?? false;
+    // Default matches n8n's official Agent node: a failing tool is reported
+    // back to the model rather than ending the run.
+    const onToolError = options.onToolError ?? 'returnToModel';
+    // isStreaming() reflects whether the actual webhook/trigger is running in
+    // streaming response mode this execution — enableStreaming is this node's
+    // own opt-in on top of that, matching the official Agent node's gating.
+    // typeof-guarded since this API may not exist on older installed n8n.
+    const streamingRequested =
+      (options.enableStreaming ?? false) &&
+      typeof this.isStreaming === 'function' &&
+      this.isStreaming() &&
+      typeof this.sendChunk === 'function';
+    const promptType = this.getNodeParameter('promptType', 0, 'auto') as string;
+
+    // Bind tools to model(s) once (immutable across items)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const boundModel: any = tools.length > 0 ? model.bindTools(tools) : model;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const boundFallbackModel: any = fallbackModel
+      ? tools.length > 0
+        ? fallbackModel.bindTools(tools)
+        : fallbackModel
+      : null;
+
 
     for (let i = 0; i < items.length; i++) {
       const itemJson = items[i].json as Record<string, unknown>;

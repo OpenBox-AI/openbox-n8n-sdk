@@ -118,7 +118,7 @@ async function handleWrapToolCall(mw, turn, toolName, toolArgs, handler) {
         wasApproved = (0, span_processor_1.isActivityApproved)(activityId);
     }
     finally {
-        (0, span_processor_1.unregisterActivity)(activityId);
+        await (0, span_processor_1.unregisterActivity)(activityId);
     }
     const endMs = Date.now();
     const duration_ms = endMs - startMs;

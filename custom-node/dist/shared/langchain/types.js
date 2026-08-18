@@ -8,6 +8,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.rfc3339Now = rfc3339Now;
 exports.safeSerialize = safeSerialize;
+exports.stableSpanId = stableSpanId;
 exports.hexId = hexId;
 /** rfc3339_now() — mirrors openbox_langgraph.types.rfc3339_now */
 function rfc3339Now() {
@@ -94,6 +95,19 @@ function toJsonSafeInner(value, seen) {
     catch {
         return '[Unserializable]';
     }
+}
+/**
+ * Deterministic 16-char hex span id derived from a seed.
+ *
+ * The started and completed halves of one operation MUST carry the same
+ * span_id: OpenBox Core creates the span row from the started hook and expects
+ * the completed hook to fill in duration/end_time, correlating them by span_id.
+ * A random id per stage leaves every span showing "started" with no duration.
+ */
+function stableSpanId(seed) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createHash } = require('crypto');
+    return createHash('sha256').update(seed).digest('hex').slice(0, 16);
 }
 /** Crypto-random hex ID. Mirrors uuid.uuid4().hex in Python. */
 function hexId(len = 32) {

@@ -13,7 +13,7 @@ import {
 } from './span_processor';
 import { ALL_DATABASE_DRIVERS, DatabaseDriverName, Logger } from './config';
 import { safeString } from './error-info';
-import { hexId } from './types';
+import { hexId, stableSpanId } from './types';
 import { GovernanceBlockedError } from './verdict';
 
 let installed = false;
@@ -34,10 +34,17 @@ function shouldSkipFilePath(path: string): boolean {
   return FILE_SKIP_PATTERNS.some((p) => path.includes(p));
 }
 
-function spanBase(name: string, kind: 'CLIENT' | 'INTERNAL', stage: string, startMs: number, error?: unknown, endMs?: number) {
+function spanBase(name: string, kind: 'CLIENT' | 'INTERNAL', stage: string, startMs: number, error?: unknown, endMs?: number, idSeed?: string) {
   const completedEndMs = stage === 'completed' ? endMs ?? Date.now() : undefined;
   return {
-    span_id: hexId(16),
+    // Stable across the started/completed pair of ONE operation. Core creates
+    // the span row from the started hook and expects the completed hook to fill
+    // in its duration, correlating the two by span_id (see UpdateCompletion /
+    // CheckHookSpanExists in openbox-core). A fresh random id per stage — which
+    // is what hexId(16) gave — left every span stuck at "started" with no
+    // duration on the dashboard. Both stages pass the same startMs, so seeding
+    // on it plus the operation identity yields one id per operation.
+    span_id: idSeed ? stableSpanId(idSeed) : hexId(16),
     trace_id: hexId(32),
     parent_span_id: null,
     name,
@@ -80,7 +87,8 @@ function buildFileSpanData(
   },
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {
-    ...spanBase(`file.${opts.operation}`, 'INTERNAL', opts.stage, opts.startMs, opts.error, opts.endMs),
+    ...spanBase(`file.${opts.operation}`, 'INTERNAL', opts.stage, opts.startMs, opts.error, opts.endMs,
+      `${activityId}|file|${opts.filePath}|${opts.operation}|${opts.startMs}`),
     hook_type: 'file_operation',
     file_path: opts.filePath,
     file_mode: opts.fileMode,
@@ -119,7 +127,8 @@ function buildDbSpanData(
 ): Record<string, unknown> {
   const operation = classifySql(opts.statement);
   return {
-    ...spanBase(`${operation} ${opts.dbSystem}`, 'CLIENT', opts.stage, opts.startMs, opts.error, opts.endMs),
+    ...spanBase(`${operation} ${opts.dbSystem}`, 'CLIENT', opts.stage, opts.startMs, opts.error, opts.endMs,
+      `${activityId}|db|${opts.dbSystem}|${opts.statement}|${opts.startMs}`),
     hook_type: 'db_query',
     db_system: opts.dbSystem,
     db_name: opts.dbName ? String(opts.dbName) : null,
@@ -430,7 +439,15 @@ function patchPgExports(pg: Record<string, unknown>): boolean {
       Client?: { prototype?: Record<string, unknown> };
       Pool?: { prototype?: Record<string, unknown> };
     };
-    const prototypes = [pgAny.Client?.prototype, pgAny.Pool?.prototype]
+    // ONLY Client.prototype — never Pool.prototype as well. node-postgres'
+    // Pool.query() acquires a client and delegates to Client.query(), so
+    // patching both records every pooled query TWICE: two identical 'started'
+    // spans for one statement. That was masked by the 1s duplicate-suppression
+    // window, which hid it against a fast local endpoint but not against a real
+    // Core, where the first span's governance round-trip takes ~1s — long
+    // enough for the dedupe entry to expire before the delegated call fires.
+    // Patching the client alone captures pooled and direct queries exactly once.
+    const prototypes = [pgAny.Client?.prototype]
       .filter((proto): proto is Record<string, unknown> => Boolean(proto));
     for (const proto of prototypes) {
       if (proto._openboxQueryPatched || typeof proto.query !== 'function') continue;
@@ -470,6 +487,24 @@ function patchPgExports(pg: Record<string, unknown>): boolean {
         const hasCallback = args.length > 0 && typeof args[args.length - 1] === 'function';
         if (hasCallback) {
           void evaluateDb(activityId, { ...dbOpts, stage: 'started', startMs });
+          // Wrap the caller's callback so the query still reports a 'completed'
+          // span. Without this, callback-style pg.query() emitted a start and
+          // nothing else — n8n's Postgres nodes use exactly this form, so
+          // activities like a tool's SELECT/INSERT showed an unmatched
+          // ActivityStarted and never closed. Mirrors the mysql2 patch below.
+          const cbIndex = args.length - 1;
+          const originalCb = args[cbIndex] as (...cbArgs: unknown[]) => unknown;
+          args[cbIndex] = function patchedPgCallback(this: unknown, err: unknown, result: unknown) {
+            void evaluateDb(activityId, {
+              ...dbOpts,
+              stage: 'completed',
+              startMs,
+              endMs: Date.now(),
+              error: err || undefined,
+              rowcount: (result as { rowCount?: number } | null)?.rowCount ?? null,
+            });
+            return originalCb.call(this, err, result);
+          };
           return original.call(self, query, ...args);
         }
 

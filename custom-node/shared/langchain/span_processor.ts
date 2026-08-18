@@ -36,7 +36,7 @@ import { openboxRequest, GovernanceAuthError, SoftGovernanceError } from '../ope
 import { safeString } from './error-info';
 import { GovernanceClient, OnApiError } from './client';
 import type { HITLConfig, Logger } from './config';
-import { rfc3339Now, hexId, GovernanceVerdictResponse } from './types';
+import { rfc3339Now, hexId, stableSpanId, GovernanceVerdictResponse } from './types';
 import { GovernanceBlockedError, GovernanceHaltError, formatActivityRejectedMessage, verdictFromString } from './verdict';
 
 function sleep(ms: number): Promise<void> {
@@ -83,6 +83,43 @@ const _activityAbort = new Map<string, string>();
 const _approvedActivities = new Set<string>();
 const _activityScope = new AsyncLocalStorage<string>();
 const _recentSpans = new Map<string, number>();
+// Fire-and-forget span sends still in flight, per activity. Completion spans
+// are dispatched without being awaited (a verdict on a finished operation
+// can't un-run it), so an activity that finishes first would delete its own
+// registration and evaluateActivitySpan would then silently drop the pending
+// completion — losing duration/error on most spans against a real Core, where
+// each send takes ~1s. Tracked here so unregisterActivity can drain them.
+const _inFlightSpans = new Map<string, Set<Promise<void>>>();
+
+// Per-activity FIFO chain for span deliveries.
+//
+// Span sends are dispatched fire-and-forget, so without this they race and
+// arrive at Core in whatever order the network settles: a completed span could
+// overtake its own started span, and concurrent operations interleaved as
+// started, started, completed, completed. Core builds the span row from the
+// started hook and fills it from the completed one, so order matters. Chaining
+// each activity's sends preserves the order they were created in, giving the
+// trace a strict started → completed, started → completed sequence. Only the
+// (already asynchronous) reporting path waits; the agent's own work never does.
+const _sendChain = new Map<string, Promise<void>>();
+
+/** Register a fire-and-forget span send so unregisterActivity can await it. */
+export function trackSpanSend(activityId: string, p: Promise<void>): void {
+  let set = _inFlightSpans.get(activityId);
+  if (!set) { set = new Set(); _inFlightSpans.set(activityId, set); }
+  const wrapped = p.catch(() => { /* already handled downstream */ }).finally(() => {
+    set!.delete(wrapped);
+    if (set!.size === 0) _inFlightSpans.delete(activityId);
+  });
+  set.add(wrapped);
+}
+
+/** Await any span sends still in flight for this activity. */
+export async function drainSpanSends(activityId: string): Promise<void> {
+  const set = _inFlightSpans.get(activityId);
+  if (!set || set.size === 0) return;
+  await Promise.all([...set]);
+}
 const _recentSpanTtlMs = 1000;
 
 let _patched = false;
@@ -170,7 +207,11 @@ export function buildHttpSpanData(opts: {
   const genAiSystem = detectGenAiSystem(opts.url);
 
   return {
-    span_id: hexId(16),
+    // Same id for the started and completed halves of one HTTP call — Core
+    // correlates them by span_id to fill in duration (see spanBase in
+    // node_instrumentation.ts for the full rationale). Seeded on the request
+    // identity plus startMs, which both stages share.
+    span_id: stableSpanId(`${opts.activityId}|http|${opts.method}|${opts.url}|${opts.startMs}`),
     trace_id: hexId(32),
     parent_span_id: null,
     name,
@@ -182,11 +223,36 @@ export function buildHttpSpanData(opts: {
     attributes: {
       'http.method': opts.method,
       'http.url': opts.url,
-      ...(genAiSystem != null ? { 'gen_ai.system': genAiSystem } : {}),
+      // Status must ride in `attributes`, not only as the root http_status_code
+      // field: Core maps the root http_* fields to NO span column (they land in
+      // the opaque `data` blob) while `attributes` is what it persists and the
+      // dashboard renders. Key and placement follow openbox-executor's
+      // telemetry._http_attributes — OTel's `http.status_code`, and only on the
+      // completed stage, where a status first exists.
+      ...(opts.statusCode != null ? { 'http.status_code': opts.statusCode } : {}),
+      // Deliberately NOT 'gen_ai.system'. Core's classifyLLMGenAI
+      // (content/session.go) returns semantic type 'llm_gen_ai' for ANY span
+      // carrying that attribute, and it runs after URL-domain matching — so an
+      // LLM host Core doesn't know (openrouter.ai is absent from its llmDomains
+      // list) lands on 'llm_gen_ai'. The dashboard's llm_gen_ai branch hardcodes
+      // statusCode: null, so the status pill silently vanished for model calls
+      // while ordinary HTTP tools kept theirs. openbox-executor's
+      // telemetry._http_attributes sends only method/url/status for the same
+      // reason; the provider still travels as the root gen_ai_system field.
     },
-    status: { code: error ? 'ERROR' : 'UNSET', description: error },
+    // UNSET while running; OK/ERROR once the call has actually finished —
+    // matches openbox-executor's span builder.
+    status: opts.stage === 'started'
+      ? { code: 'UNSET', description: null }
+      : { code: error ? 'ERROR' : 'OK', description: error },
     events: [],
     hook_type: 'http_request',
+    // Advisory only — Core recomputes semantic_type for every span
+    // (governance_workflow.go -> ComputeSemanticTypeFromSpan), so this does not
+    // decide the label today. Sent anyway because it is Core's own vocabulary
+    // and openbox-executor declares it the same way, which makes the intent
+    // explicit and takes effect if Core ever honours the declared value.
+    ...(genAiSystem != null ? { semantic_type: 'llm_completion' } : {}),
     http_method: opts.method,
     http_url: opts.url,
     gen_ai_system: genAiSystem,
@@ -208,6 +274,13 @@ async function evaluateHookSpan(
   spanData: Record<string, unknown>,
 ): Promise<void> {
   if (isDuplicateSpan(entry.ctx.activity_id, spanData)) return;
+  // event_type stays 'ActivityStarted' for BOTH stages — deliberately. A hook
+  // span is not an activity lifecycle event: Core creates the span row from the
+  // started hook and fills its duration/end_time from the completed hook
+  // (UpdateCompletion in openbox-core), telling them apart by the span's own
+  // `stage` field. Relabelling the completed hook as 'ActivityCompleted' made
+  // Core read it as a lifecycle completion instead, so durations were never
+  // filled in and every span sat at "started" on the dashboard.
   const payload: Record<string, unknown> = {
     ...entry.ctx,
     timestamp: rfc3339Now(),
@@ -282,7 +355,18 @@ export async function evaluateActivitySpan(
   }
   const entry = _activeActivities.get(activityId);
   if (!entry) return;
-  await evaluateHookSpan(entry, spanData);
+
+  // Queue behind this activity's previous span send so deliveries keep their
+  // creation order. A failed send must not stall the ones behind it, hence the
+  // caught copy in the chain.
+  const previous = _sendChain.get(activityId) ?? Promise.resolve();
+  const pending = previous.then(() => evaluateHookSpan(entry, spanData));
+  _sendChain.set(activityId, pending.catch(() => { /* chain must survive */ }));
+
+  // Track before awaiting: callers that fire-and-forget (`void evaluateDb(...)`)
+  // otherwise race their own activity's unregistration and lose the span.
+  trackSpanSend(activityId, pending);
+  await pending;
 }
 
 export function getCurrentActivityId(): string | undefined {
@@ -884,10 +968,18 @@ export function isActivityApproved(activityId: string): boolean {
  * Unregister an LLM activity after the model call completes.
  * Mirrors Python's span_processor.clear_activity_context().
  */
-export function unregisterActivity(activityId: string): void {
+export async function unregisterActivity(activityId: string): Promise<void> {
+  // Drain first: dropping the registration while completion spans are still in
+  // flight makes evaluateActivitySpan discard them, so operations would show a
+  // 'started' span and never a 'completed' one.
+  try {
+    await drainSpanSends(activityId);
+  } catch { /* individual sends already fail-open */ }
   _activeActivities.delete(activityId);
   _activityAbort.delete(activityId);
   _approvedActivities.delete(activityId);
+  _inFlightSpans.delete(activityId);
+  _sendChain.delete(activityId);
 }
 
 /**

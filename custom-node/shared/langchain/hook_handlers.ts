@@ -283,7 +283,7 @@ export async function handleWrapModelCall(
     // Capture BEFORE finally runs — unregisterActivity clears _approvedActivities.
     llmWasApproved = isActivityApproved(activityId);
   } finally {
-    unregisterActivity(activityId);
+    await unregisterActivity(activityId);
   }
   const endMs = Date.now();
   const duration_ms = endMs - startMs;
@@ -402,7 +402,7 @@ export async function handleWrapMemoryOp<T>(
     errorInfo = toErrorInfo(failure);
     throw failure;
   } finally {
-    unregisterActivity(activityId);
+    await unregisterActivity(activityId);
     const completedEvent = buildEvent(mw, turn, 'ActivityCompleted', activityId, opType, {
       status,
       duration_ms: Date.now() - startMs,

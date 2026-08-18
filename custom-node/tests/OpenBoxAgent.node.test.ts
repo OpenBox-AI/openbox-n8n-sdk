@@ -37,6 +37,7 @@ import {
   emitStreamChunks,
   flattenConnectedTools,
   resolveSessionId,
+  resolveChatModel,
 } from '../nodes/OpenBoxAgent/OpenBoxAgent.node';
 
 /** The intermediate-step shape the official Agent node emits. */
@@ -80,11 +81,15 @@ function makeCtx(opts: FakeCtxOptions = {}) {
   const ctx = {
     getInputData: () => [{ json: opts.itemJson ?? {} }],
     continueOnFail: () => false,
-    getInputConnectionData: async (connectionType: string, _itemIndex: number, inputIndex?: number) => {
+    getInputConnectionData: async (connectionType: string) => {
       if (connectionType === 'ai_languageModel') {
-        if (inputIndex === 1) return (opts.hasFallbackConnection ?? true) ? {} : null;
-        // bindTools must exist — the node binds connected tools to the model.
-        return { bindTools: (t: unknown[]) => ({ _bound: t }) };
+        // Mirrors real n8n: a single connection yields the model itself, but
+        // multiple connections yield an ARRAY in reverse port order, which the
+        // caller reverses and indexes. Never keyed off inputIndex.
+        const primary = { bindTools: (t: unknown[]) => ({ _bound: t }) };
+        const fallback = { bindTools: (t: unknown[]) => ({ _bound: t, _fallback: true }) };
+        if (!opts.needsFallback) return primary;
+        return (opts.hasFallbackConnection ?? true) ? [fallback, primary] : [primary];
       }
       if (connectionType === 'ai_tool') return opts.toolConnectionData ?? [];
       if (connectionType === 'ai_memory') return null;
@@ -564,5 +569,87 @@ describe('span_processor URL reconstruction', () => {
     expect(shouldIgnore('http://127.0.0.1:9902/api/v1/governance/evaluate')).toBe(true);
     // A different port on the same host must NOT be swallowed.
     expect(shouldIgnore('http://127.0.0.1:9901/backup-weather')).toBe(false);
+  });
+});
+
+// ── Gap 5: chat model retrieval with a fallback connected ────────────────────
+describe('resolveChatModel', () => {
+  const ctxWith = (connected: unknown) => ({
+    getInputConnectionData: async () => connected,
+  }) as unknown as Parameters<typeof resolveChatModel>[0];
+
+  it('returns the model directly when only one is connected', async () => {
+    const model = { bindTools: () => ({}) };
+    expect(await resolveChatModel(ctxWith(model), 0)).toBe(model);
+  });
+
+  it('returns null for index 1 when only one model is connected', async () => {
+    expect(await resolveChatModel(ctxWith({ bindTools: () => ({}) }), 1)).toBeNull();
+  });
+
+  it('picks primary then fallback out of the reversed array n8n actually returns', async () => {
+    // n8n hands back every connected model in reverse port order; index 0 must
+    // resolve to the Chat Model port and index 1 to the Fallback Model port.
+    const primary = { id: 'primary' };
+    const fallback = { id: 'fallback' };
+    const ctx = ctxWith([fallback, primary]);
+    expect(await resolveChatModel(ctx, 0)).toBe(primary);
+    expect(await resolveChatModel(ctx, 1)).toBe(fallback);
+  });
+
+  it('returns null when the requested index is beyond what is connected', async () => {
+    expect(await resolveChatModel(ctxWith([{ id: 'only' }]), 1)).toBeNull();
+  });
+
+  it('returns null for an empty or missing connection', async () => {
+    expect(await resolveChatModel(ctxWith([]), 0)).toBeNull();
+    expect(await resolveChatModel(ctxWith(null), 0)).toBeNull();
+  });
+
+  it('binds tools to the real model, not the array (the Model Selector crash)', async () => {
+    // Regression guard for "model.bindTools is not a function": with a
+    // fallback connected, the node used to receive the whole array.
+    mockWrapModelCall.mockResolvedValueOnce({ content: 'ok', tool_calls: [] });
+    const { ctx } = makeCtx({
+      needsFallback: true,
+      hasFallbackConnection: true,
+      toolConnectionData: [fakeTool('t1')],
+    });
+    const result = await new OpenBoxAgent().execute.call(ctx);
+    expect(result[0][0].json.output).toBe('ok');
+  });
+});
+
+// ── Span instrumentation ordering ────────────────────────────────────────────
+describe('instrumentation ordering', () => {
+  it('installs instrumentation BEFORE retrieving the chat model', async () => {
+    // The OpenAI SDK resolves `this.fetch` once in its constructor, so the
+    // model client must not be built before patchFetch has run — otherwise the
+    // client keeps the unpatched fetch and llm_call activities carry no spans.
+    const order: string[] = [];
+    mockWrapModelCall.mockImplementation(async () => ({ content: 'ok', tool_calls: [] }));
+
+    const { OpenBoxLangChainMiddleware } = await import('../shared/langchain');
+    (OpenBoxLangChainMiddleware as unknown as { mockImplementation: (f: () => unknown) => void })
+      .mockImplementation(function () {
+        order.push('middleware-constructed');
+        return {
+          _config: {}, beforeAgent: mockBeforeAgent, afterAgent: mockAfterAgent,
+          wrapModelCall: mockWrapModelCall, wrapMemoryOp: mockWrapMemoryOp, wrapToolCall: mockWrapToolCall,
+        };
+      });
+
+    const { ctx } = makeCtx();
+    const original = ctx.getInputConnectionData.bind(ctx);
+    (ctx as unknown as { getInputConnectionData: unknown }).getInputConnectionData = async (
+      ...args: Parameters<typeof original>
+    ) => {
+      if (args[0] === 'ai_languageModel') order.push('model-retrieved');
+      return original(...args);
+    };
+
+    await new OpenBoxAgent().execute.call(ctx);
+    expect(order.indexOf('middleware-constructed')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('model-retrieved')).toBeGreaterThan(order.indexOf('middleware-constructed'));
   });
 });

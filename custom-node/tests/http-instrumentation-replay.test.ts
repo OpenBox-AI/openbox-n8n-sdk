@@ -123,3 +123,84 @@ describe('HTTP instrumentation body replay', () => {
     }
   });
 });
+
+// ── Stable span ids across the started/completed pair ────────────────────────
+describe('span_id correlation', () => {
+  it('gives the started and completed halves of one operation the SAME span_id', async () => {
+    const { buildHttpSpanData } = await import('../shared/langchain/span_processor');
+    const common = { activityId: 'act-1', method: 'POST', url: 'https://x.test/v1/chat', startMs: 1000 };
+    const started = buildHttpSpanData({ ...common, stage: 'started' } as never) as Record<string, unknown>;
+    const completed = buildHttpSpanData({
+      ...common, stage: 'completed', endMs: 1200, statusCode: 200,
+    } as never) as Record<string, unknown>;
+    // Core creates the row on 'started' and fills duration from 'completed',
+    // matching them by span_id — differing ids leave spans stuck at "started".
+    expect(started.span_id).toBe(completed.span_id);
+    expect(String(started.span_id)).toHaveLength(16);
+  });
+
+  it('gives different operations different span_ids', async () => {
+    const { buildHttpSpanData } = await import('../shared/langchain/span_processor');
+    const a = buildHttpSpanData({ activityId:'act-1', method:'POST', url:'https://x.test/a', startMs:1000, stage:'started' } as never) as Record<string, unknown>;
+    const b = buildHttpSpanData({ activityId:'act-1', method:'POST', url:'https://x.test/b', startMs:1000, stage:'started' } as never) as Record<string, unknown>;
+    expect(a.span_id).not.toBe(b.span_id);
+  });
+});
+
+// ── Status code exposed where the dashboard reads it ─────────────────────────
+describe('http span attributes', () => {
+  const build = async (opts: Record<string, unknown>) => {
+    const { buildHttpSpanData } = await import('../shared/langchain/span_processor');
+    return buildHttpSpanData(opts as never) as Record<string, unknown>;
+  };
+  const LLM = 'https://openrouter.ai/api/v1/chat/completions';
+
+  it('puts the status code in attributes, where the dashboard reads it', async () => {
+    const span = await build({
+      activityId: 'a', method: 'POST', url: LLM, startMs: 1,
+      stage: 'completed', endMs: 2, statusCode: 200,
+    });
+    const attrs = span.attributes as Record<string, unknown>;
+    // Canonical OTel key, per openbox-executor telemetry._http_attributes.
+    expect(attrs['http.status_code']).toBe(200);
+    expect((span.status as Record<string, unknown>).code).toBe('OK');
+  });
+
+  it('declares semantic_type llm_completion and keeps gen_ai.system OUT of attributes', async () => {
+    const span = await build({
+      activityId: 'a', method: 'POST', url: LLM, startMs: 1,
+      stage: 'completed', endMs: 2, statusCode: 200,
+    });
+    expect(span.semantic_type).toBe('llm_completion');
+    // gen_ai.system in attributes makes Core classify the span 'llm_gen_ai',
+    // whose dashboard branch hardcodes statusCode: null and drops the status
+    // pill. The provider still travels as the root field.
+    const attrs = span.attributes as Record<string, unknown>;
+    expect('gen_ai.system' in attrs).toBe(false);
+    expect(span.gen_ai_system).toBe('openrouter');
+  });
+
+  it('leaves semantic_type unset for a non-LLM call', async () => {
+    const span = await build({
+      activityId: 'a', method: 'POST', url: 'https://x.test/webhook', startMs: 1,
+      stage: 'completed', endMs: 2, statusCode: 204,
+    });
+    expect(span.semantic_type).toBeUndefined();
+    expect((span.attributes as Record<string, unknown>)['http.status_code']).toBe(204);
+  });
+
+  it('omits status on a started span, which has no status yet', async () => {
+    const span = await build({ activityId: 'a', method: 'POST', url: LLM, startMs: 1, stage: 'started' });
+    const attrs = span.attributes as Record<string, unknown>;
+    expect('http.status_code' in attrs).toBe(false);
+    expect((span.status as Record<string, unknown>).code).toBe('UNSET');
+  });
+
+  it('reports ERROR status on a failed completion', async () => {
+    const span = await build({
+      activityId: 'a', method: 'POST', url: LLM, startMs: 1, stage: 'completed', endMs: 2,
+      statusCode: 500, error: 'boom',
+    });
+    expect((span.status as Record<string, unknown>).code).toBe('ERROR');
+  });
+});
