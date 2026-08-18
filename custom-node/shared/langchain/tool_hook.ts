@@ -144,7 +144,7 @@ export async function handleWrapToolCall(
     // Capture BEFORE finally runs — unregisterActivity clears _approvedActivities.
     wasApproved = isActivityApproved(activityId);
   } finally {
-    unregisterActivity(activityId);
+    await unregisterActivity(activityId);
   }
 
   const endMs = Date.now();
