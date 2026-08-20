@@ -110,7 +110,7 @@ async function evaluateFile(
   await evaluateActivitySpan(activityId, buildFileSpanData(activityId, opts));
 }
 
-function buildDbSpanData(
+export function buildDbSpanData(
   activityId: string,
   opts: {
     dbSystem: string;
@@ -123,9 +123,15 @@ function buildDbSpanData(
     endMs?: number;
     error?: unknown;
     rowcount?: number | null;
+    /**
+     * Operation name when the caller already knows it. Redis and Mongo do —
+     * their statements are commands and JSON, not SQL, so running them through
+     * classifySql yields UNKNOWN and leaves the span unreadable.
+     */
+    operation?: string;
   },
 ): Record<string, unknown> {
-  const operation = classifySql(opts.statement);
+  const operation = opts.operation ?? classifySql(opts.statement);
   return {
     ...spanBase(`${operation} ${opts.dbSystem}`, 'CLIENT', opts.stage, opts.startMs, opts.error, opts.endMs,
       `${activityId}|db|${opts.dbSystem}|${opts.statement}|${opts.startMs}`),
@@ -662,7 +668,8 @@ function patchMongoExports(mongodb: Record<string, unknown>): boolean {
       const statement = JSON.stringify({ [method]: filter ?? {} }).slice(0, 2000);
       const startMs = Date.now();
       const dbName = self.dbName ?? self.s?.dbName ?? String(self.namespace ?? self.s?.namespace ?? '').split('.')[0];
-      void evaluateDb(activityId, { dbSystem: 'mongodb', dbName, statement, host: 'unknown', port: null, stage: 'started', startMs });
+      const operation = method.toUpperCase();
+      void evaluateDb(activityId, { dbSystem: 'mongodb', dbName, operation, statement, host: 'unknown', port: null, stage: 'started', startMs });
       const result = original.call(self, filter, ...args) as unknown;
       if (result && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
         return (result as Promise<unknown>).then(
@@ -670,6 +677,7 @@ function patchMongoExports(mongodb: Record<string, unknown>): boolean {
             await evaluateDb(activityId, {
               dbSystem: 'mongodb',
               dbName,
+              operation,
               statement,
               host: 'unknown',
               port: null,
@@ -683,6 +691,7 @@ function patchMongoExports(mongodb: Record<string, unknown>): boolean {
             await evaluateDb(activityId, {
               dbSystem: 'mongodb',
               dbName,
+              operation,
               statement,
               host: 'unknown',
               port: null,
@@ -750,8 +759,9 @@ function patchRedisClient(client: Record<string, unknown>): boolean {
       ? String(command[0] ?? 'UNKNOWN')
       : String((command as Record<string, unknown> | null)?.name ?? command ?? 'UNKNOWN');
     const statement = Array.isArray(command) ? command.map(String).join(' ') : name;
+    const operation = name.toUpperCase();
     const startMs = Date.now();
-    void evaluateDb(activityId, { dbSystem: 'redis', dbName: '0', statement, host: 'unknown', port: 6379, stage: 'started', startMs });
+    void evaluateDb(activityId, { dbSystem: 'redis', dbName: '0', operation, statement, host: 'unknown', port: 6379, stage: 'started', startMs });
     const result = original.call(this, command, ...args) as unknown;
     if (result && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
       return (result as Promise<unknown>).then(
@@ -759,6 +769,7 @@ function patchRedisClient(client: Record<string, unknown>): boolean {
           await evaluateDb(activityId, {
             dbSystem: 'redis',
             dbName: '0',
+            operation,
             statement,
             host: 'unknown',
             port: 6379,
@@ -772,6 +783,7 @@ function patchRedisClient(client: Record<string, unknown>): boolean {
           await evaluateDb(activityId, {
             dbSystem: 'redis',
             dbName: '0',
+            operation,
             statement,
             host: 'unknown',
             port: 6379,
