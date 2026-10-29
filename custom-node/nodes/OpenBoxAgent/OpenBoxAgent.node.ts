@@ -1064,7 +1064,7 @@ function mapGovernanceError(
   if (err instanceof GovernanceAuthError) {
     throw new NodeOperationError(
       ctx.getNode(),
-      'OpenBox credential rejected by Core (401/403) — check the API key, Agent DID, and Agent Private Key.',
+      'OpenBox credential rejected (401/403) — check the API key and the Workload Private Key (or Agent DID and Agent Private Key).',
       { itemIndex, description: err.message },
     );
   }
@@ -1083,11 +1083,12 @@ function mapGovernanceError(
     );
   }
   if (err instanceof GovernanceBlockedError) {
-    throw new NodeOperationError(
-      ctx.getNode(),
-      `OpenBox governance requires approval`,
-      { itemIndex, description: err.message },
-    );
+    // Titled by the verdict it carries: a BLOCK is not a pending approval.
+    const title =
+      err.verdict === 'require_approval' ? 'OpenBox governance requires approval'
+        : err.verdict === 'halt' ? 'OpenBox governance halted the workflow'
+          : 'OpenBox governance blocked the operation';
+    throw new NodeOperationError(ctx.getNode(), title, { itemIndex, description: err.message });
   }
   if (err instanceof GuardrailsValidationError) {
     throw new NodeOperationError(

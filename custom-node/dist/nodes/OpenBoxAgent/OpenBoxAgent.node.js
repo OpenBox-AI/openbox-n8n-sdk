@@ -935,7 +935,7 @@ exports.OpenBoxAgent = OpenBoxAgent;
 // ── Governance error → NodeOperationError ─────────────────────────────────────
 function mapGovernanceError(err, ctx, itemIndex) {
     if (err instanceof openbox_client_1.GovernanceAuthError) {
-        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), 'OpenBox credential rejected by Core (401/403) — check the API key, Agent DID, and Agent Private Key.', { itemIndex, description: err.message });
+        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), 'OpenBox credential rejected (401/403) — check the API key and the Workload Private Key (or Agent DID and Agent Private Key).', { itemIndex, description: err.message });
     }
     if (err instanceof langchain_1.GovernanceHaltError) {
         // err.message is one of: "Activity rejected: ...", "Approval expired for
@@ -948,7 +948,11 @@ function mapGovernanceError(err, ctx, itemIndex) {
         throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), 'OpenBox governance halted the workflow', { itemIndex, description: err.message });
     }
     if (err instanceof langchain_1.GovernanceBlockedError) {
-        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), `OpenBox governance requires approval`, { itemIndex, description: err.message });
+        // Titled by the verdict it carries: a BLOCK is not a pending approval.
+        const title = err.verdict === 'require_approval' ? 'OpenBox governance requires approval'
+            : err.verdict === 'halt' ? 'OpenBox governance halted the workflow'
+                : 'OpenBox governance blocked the operation';
+        throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), title, { itemIndex, description: err.message });
     }
     if (err instanceof langchain_1.GuardrailsValidationError) {
         throw new n8n_workflow_1.NodeOperationError(ctx.getNode(), `OpenBox guardrails validation failed: ${err.message}`, { itemIndex });
