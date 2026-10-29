@@ -83,6 +83,32 @@ export function formatActivityRejectedMessage(reason?: string | null): string {
   return trimmed ? `Activity rejected: ${trimmed}` : 'Activity rejected (no reason provided)';
 }
 
+/**
+ * The approval Core opened for a REQUIRE_APPROVAL verdict: `approval_id`,
+ * else `governance_event_id` (else a bare `id`).
+ */
+export function awaitedApprovalId(response: GovernanceVerdictResponse): string | undefined {
+  const id = response.approval_id ?? response.approvalId ?? response.governance_event_id ?? response.id;
+  return typeof id === 'string' && id ? id : undefined;
+}
+
+/**
+ * Whether a polled final decision belongs to a different approval than the one
+ * being waited on, and so must not be acted on.
+ *
+ * Core keys approval polls on (workflow_id, run_id, activity_id), which two
+ * approvals of one activity share. Once the newer approval is decided, Core
+ * can answer with the older one; acting on that turns a rejection into an
+ * approval. Unknown ids on either side are not treated as a mismatch.
+ */
+export function isDecisionForAnotherApproval(
+  poll: { approval_id?: unknown; id?: unknown },
+  awaitedId: string | undefined,
+): boolean {
+  const polledId = poll.approval_id ?? poll.id;
+  return typeof polledId === 'string' && polledId !== '' && awaitedId != null && polledId !== awaitedId;
+}
+
 export interface VerdictResult {
   /** True when arm === 'require_approval' and the caller should poll. */
   requiresHitl: boolean;
@@ -126,8 +152,7 @@ export function enforceVerdict(
   }
 
   if (arm === 'require_approval') {
-    const approvalId = response.approval_id ?? response.approvalId ?? response.id;
-    return { requiresHitl: true, approvalId };
+    return { requiresHitl: true, approvalId: awaitedApprovalId(response) };
   }
 
   return { requiresHitl: false };

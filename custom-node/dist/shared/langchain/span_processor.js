@@ -367,6 +367,9 @@ async function pollHookApproval(entry, activityId, activityType, approvalId) {
             continue;
         }
         const verdict = (0, verdict_1.verdictFromString)(rawVerdict);
+        if (verdict !== 'require_approval' && (0, verdict_1.isDecisionForAnotherApproval)(response, approvalId)) {
+            throw abortAndThrow(activityId, `OpenBox returned the decision for approval ${String(response.approval_id ?? response.id)} instead of ${approvalId}`);
+        }
         if (verdict === 'allow')
             return;
         if (verdict === 'block' || verdict === 'halt') {
@@ -382,8 +385,7 @@ async function enforceHookVerdict(entry, response, identifier) {
     const activityId = entry.ctx.activity_id;
     const verdict = (0, verdict_1.verdictFromString)(response.verdict ?? response.arm ?? response.action);
     if (verdict === 'require_approval') {
-        const approvalId = response.approval_id ?? response.approvalId ?? response.id;
-        await pollHookApproval(entry, activityId, entry.ctx.activity_type, approvalId);
+        await pollHookApproval(entry, activityId, entry.ctx.activity_type, (0, verdict_1.awaitedApprovalId)(response));
         // Approved — mark so a subsequent hook span or the ToolCompleted/LLMCompleted
         // event-level check doesn't ask Core for approval a second time.
         markActivityApproved(activityId);

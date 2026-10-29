@@ -1,6 +1,11 @@
 import type { OpenBoxLangChainMiddleware } from './middleware';
 import type { Turn } from './hooks';
-import { GovernanceHaltError, formatActivityRejectedMessage, verdictFromString } from './verdict';
+import {
+  GovernanceHaltError,
+  formatActivityRejectedMessage,
+  isDecisionForAnotherApproval,
+  verdictFromString,
+} from './verdict';
 
 const _timersMod = 'timers';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -56,6 +61,14 @@ export async function pollApprovalOrHalt(
     }
 
     const verdict = verdictFromString(rawVerdict);
+
+    // A final decision for another approval of this activity is never acted
+    // on: failing safe beats approving what a human rejected.
+    if (verdict !== 'require_approval' && isDecisionForAnotherApproval(response, approvalId)) {
+      throw new GovernanceHaltError(
+        `OpenBox returned the decision for approval ${String(response.approval_id ?? response.id)} instead of ${approvalId}`,
+      );
+    }
 
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {

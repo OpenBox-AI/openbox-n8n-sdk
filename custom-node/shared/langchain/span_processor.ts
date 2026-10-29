@@ -38,7 +38,14 @@ import { safeString } from './error-info';
 import { GovernanceClient, OnApiError } from './client';
 import type { HITLConfig, Logger } from './config';
 import { rfc3339Now, hexId, stableSpanId, GovernanceVerdictResponse } from './types';
-import { GovernanceBlockedError, GovernanceHaltError, formatActivityRejectedMessage, verdictFromString } from './verdict';
+import {
+  GovernanceBlockedError,
+  GovernanceHaltError,
+  awaitedApprovalId,
+  formatActivityRejectedMessage,
+  isDecisionForAnotherApproval,
+  verdictFromString,
+} from './verdict';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => _st(resolve, ms));
@@ -432,6 +439,13 @@ async function pollHookApproval(
 
     const verdict = verdictFromString(rawVerdict);
 
+    if (verdict !== 'require_approval' && isDecisionForAnotherApproval(response, approvalId)) {
+      throw abortAndThrow(
+        activityId,
+        `OpenBox returned the decision for approval ${String(response.approval_id ?? response.id)} instead of ${approvalId}`,
+      );
+    }
+
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {
       throw abortAndThrow(activityId, formatActivityRejectedMessage(response.reason));
@@ -456,8 +470,7 @@ async function enforceHookVerdict(
   const verdict = verdictFromString(response.verdict ?? response.arm ?? response.action);
 
   if (verdict === 'require_approval') {
-    const approvalId = response.approval_id ?? response.approvalId ?? response.id;
-    await pollHookApproval(entry, activityId, entry.ctx.activity_type, approvalId as string | undefined);
+    await pollHookApproval(entry, activityId, entry.ctx.activity_type, awaitedApprovalId(response));
     // Approved — mark so a subsequent hook span or the ToolCompleted/LLMCompleted
     // event-level check doesn't ask Core for approval a second time.
     markActivityApproved(activityId);
