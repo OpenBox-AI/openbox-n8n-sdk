@@ -10,7 +10,7 @@
 import { IExecuteFunctions } from 'n8n-workflow';
 
 import { openboxRequest, SoftGovernanceError } from '../openbox-client';
-import { GovernanceVerdictResponse, LangChainGovernanceEvent } from './types';
+import { GovernancePatch, GovernanceVerdictResponse, LangChainGovernanceEvent } from './types';
 
 export type OnApiError = 'fail_open' | 'fail_closed';
 
@@ -55,6 +55,8 @@ export interface ApprovalPollResponse {
   approval_expiration_time?: string;
   approvalExpirationTime?: string;
   expired?: boolean;
+  /** Remediation directive Core sends with a rejection (BLOCK). */
+  patch?: GovernancePatch;
   [key: string]: unknown;
 }
 
@@ -114,13 +116,12 @@ export class GovernanceClient {
     approvalId?: string,
     onApiError: OnApiError = 'fail_open',
   ): Promise<ApprovalPollResponse | null> {
-    // If Core returned an approval_id in the evaluate response, use it as the
-    // poll key (mirrors Python SDK's exc.action_id pattern). Otherwise fall
-    // back to the triple (workflow_id, run_id, activity_id).
-    const pollKey = approvalId ?? activityId;
-    const reqBody = approvalId
-      ? { workflow_id: pollKey, run_id: pollKey, activity_id: pollKey }
-      : { workflow_id: workflowId, run_id: runId, activity_id: activityId };
+    // Core keys approval polls on (workflow_id, run_id, activity_id) and has
+    // no poll-by-id; the approval id is checked against the answer instead
+    // (see isDecisionForAnotherApproval). Sending the approval id in all
+    // three fields, as this used to, matched no approval at all.
+    void approvalId;
+    const reqBody = { workflow_id: workflowId, run_id: runId, activity_id: activityId };
     try {
       const data = await openboxRequest<ApprovalPollResponse>(this.executeFunctions, {
         method: 'POST',

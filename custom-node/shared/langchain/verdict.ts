@@ -6,7 +6,7 @@
  * here for structural completeness even though n8n skips the OTel layer.
  */
 
-import { GovernanceVerdictResponse, VerdictArm } from './types';
+import { GovernancePatch, GovernanceVerdictResponse, VerdictArm } from './types';
 
 export class GovernanceHaltError extends Error {
   constructor(message: string) {
@@ -17,11 +17,43 @@ export class GovernanceHaltError extends Error {
 
 export class GovernanceBlockedError extends Error {
   verdict: VerdictArm;
-  constructor(verdict: VerdictArm, message: string) {
+  /** The remediation directive Core sent with this block, if any. */
+  patch: GovernancePatch | null;
+  constructor(verdict: VerdictArm, message: string, patch: GovernancePatch | null = null) {
     super(message);
     this.name = 'GovernanceBlockedError';
     this.verdict = verdict;
+    this.patch = patch;
   }
+}
+
+/**
+ * Read a patch off a verdict or approval-poll response, if it carries a usable
+ * one. Core has already validated the shape; a body that is not an object
+ * degrades to "no directive", as it does on Core.
+ */
+export function patchFrom(response: { patch?: unknown } | null | undefined): GovernancePatch | null {
+  const patch = response?.patch;
+  if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) return null;
+  return patch as GovernancePatch;
+}
+
+/**
+ * Append the policy's suggested input to a block message. The message is what
+ * reaches the model when a governed call is blocked, so the model can retry
+ * with it — and that retry is governed again. The node never applies the patch
+ * itself.
+ */
+export function withPatchHint(message: string, patch: GovernancePatch | null): string {
+  if (patch == null || !('new_input' in patch)) return message;
+  let suggestion: string | undefined;
+  try {
+    suggestion = JSON.stringify(patch.new_input);
+  } catch {
+    return message;
+  }
+  if (suggestion === undefined) return message;
+  return `${message} — policy suggests retrying with: ${suggestion}`;
 }
 
 export class GuardrailsValidationError extends Error {
@@ -83,6 +115,32 @@ export function formatActivityRejectedMessage(reason?: string | null): string {
   return trimmed ? `Activity rejected: ${trimmed}` : 'Activity rejected (no reason provided)';
 }
 
+/**
+ * The approval Core opened for a REQUIRE_APPROVAL verdict: `approval_id`,
+ * else `governance_event_id` (else a bare `id`).
+ */
+export function awaitedApprovalId(response: GovernanceVerdictResponse): string | undefined {
+  const id = response.approval_id ?? response.approvalId ?? response.governance_event_id ?? response.id;
+  return typeof id === 'string' && id ? id : undefined;
+}
+
+/**
+ * Whether a polled final decision belongs to a different approval than the one
+ * being waited on, and so must not be acted on.
+ *
+ * Core keys approval polls on (workflow_id, run_id, activity_id), which two
+ * approvals of one activity share. Once the newer approval is decided, Core
+ * can answer with the older one; acting on that turns a rejection into an
+ * approval. Unknown ids on either side are not treated as a mismatch.
+ */
+export function isDecisionForAnotherApproval(
+  poll: { approval_id?: unknown; id?: unknown },
+  awaitedId: string | undefined,
+): boolean {
+  const polledId = poll.approval_id ?? poll.id;
+  return typeof polledId === 'string' && polledId !== '' && awaitedId != null && polledId !== awaitedId;
+}
+
 export interface VerdictResult {
   /** True when arm === 'require_approval' and the caller should poll. */
   requiresHitl: boolean;
@@ -109,9 +167,11 @@ export function enforceVerdict(
     );
   }
   if (arm === 'block') {
+    const patch = patchFrom(response);
     throw new GovernanceBlockedError(
       'block',
-      `OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`,
+      withPatchHint(`OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`, patch),
+      patch,
     );
   }
 
@@ -126,8 +186,7 @@ export function enforceVerdict(
   }
 
   if (arm === 'require_approval') {
-    const approvalId = response.approval_id ?? response.approvalId ?? response.id;
-    return { requiresHitl: true, approvalId };
+    return { requiresHitl: true, approvalId: awaitedApprovalId(response) };
   }
 
   return { requiresHitl: false };

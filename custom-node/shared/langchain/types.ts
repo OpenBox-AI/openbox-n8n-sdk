@@ -15,7 +15,20 @@ export interface GuardrailsResult {
   [key: string]: unknown;
 }
 
+/**
+ * The optional remediation directive Core attaches to a BLOCK verdict
+ * (policy-produced, or written by a reviewer). Core's contract: an object with
+ * exactly the key `new_input`; malformed or oversized patches are dropped by
+ * Core. It is a hint, not an instruction the node executes.
+ */
+export interface GovernancePatch {
+  new_input?: unknown;
+  [key: string]: unknown;
+}
+
 export interface GovernanceVerdictResponse {
+  /** Remediation directive; present only on a BLOCK. See `GovernancePatch`. */
+  patch?: GovernancePatch;
   arm?: VerdictArm;
   verdict?: string;
   action?: string;
@@ -81,6 +94,11 @@ export interface LangChainGovernanceEvent {
   tool_type?: string;
   // OTel hook layer (Layer 2) — mirrors Python SDK hook_governance._build_payload()
   hook_trigger?: boolean;
+  /**
+   * Position of this event within its run, 1-based and gapless. Makes the
+   * order explicit rather than inferred from timestamps that can tie.
+   */
+  sequence?: number;
   [key: string]: unknown;
 }
 

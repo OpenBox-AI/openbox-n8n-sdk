@@ -1,13 +1,56 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GovernanceAuthError = exports.SoftGovernanceError = void 0;
+exports.workloadHttpFor = workloadHttpFor;
+exports.toGovernanceError = toGovernanceError;
 exports.getOpenBoxCredentials = getOpenBoxCredentials;
 exports.openboxRequest = openboxRequest;
 /* eslint-disable @n8n/community-nodes/require-node-api-error */
 const n8n_workflow_1 = require("n8n-workflow");
 const OpenBoxApi_credentials_1 = require("../credentials/OpenBoxApi.credentials");
+const ignored_urls_1 = require("./ignored-urls");
 const signing_1 = require("./signing");
+const workload_identity_1 = require("./workload-identity");
 const OPENBOX_TIMEOUT_MS = 35_000;
+/** Core's v1 paths and their v3 (workload identity) counterparts. */
+const V3_PATHS = {
+    '/api/v1/governance/evaluate': '/api/v3/governance/evaluate',
+    '/api/v1/governance/approval': '/api/v3/governance/approval',
+    '/api/v1/auth/validate': '/api/v3/auth/validate',
+};
+/** n8n's request helper as the raw transport for the workload bootstrap and token exchange. */
+function workloadHttpFor(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+helpers, timeoutMs) {
+    return async ({ method, url, headers, body }) => {
+        const response = await helpers.httpRequest({
+            method,
+            url,
+            headers,
+            body,
+            json: false,
+            timeout: timeoutMs,
+            returnFullResponse: true,
+            ignoreHttpStatusErrors: true,
+        });
+        const raw = response?.body;
+        const text = typeof raw === 'string' ? raw
+            : Buffer.isBuffer(raw) ? raw.toString('utf-8')
+                : raw == null ? ''
+                    : JSON.stringify(raw);
+        return { status: Number(response?.statusCode ?? 0), body: text };
+    };
+}
+/**
+ * Map a workload-identity failure onto the client's error contract: network
+ * trouble follows onApiError like any outage; a rejected or misconfigured
+ * identity always fails closed.
+ */
+function toGovernanceError(err) {
+    if (err.kind === 'network')
+        return new SoftGovernanceError(err.message, err);
+    return new GovernanceAuthError(err.message, err.statusCode ?? 0, err);
+}
 async function getOpenBoxCredentials(ctx) {
     try {
         const raw = await ctx.getCredentials('openBoxApi');
@@ -25,10 +68,40 @@ async function getOpenBoxCredentials(ctx) {
 }
 async function openboxRequest(ctx, options) {
     const credentials = await getOpenBoxCredentials(ctx);
-    const url = `${credentials.openboxUrl}${options.path}`;
+    const timeoutMs = options.timeoutMs ?? OPENBOX_TIMEOUT_MS;
     // Serialize body before signing so the bytes we hash == the bytes we send.
     const bodyBytes = (0, signing_1.serializeBody)(options.body ?? null);
-    const headers = (0, signing_1.buildSignedHeaders)(options.method, options.path, bodyBytes, credentials.apiKey, credentials.agentDid, credentials.agentPrivateKey);
+    // v3 workload identity when the credential carries a workload key and Core
+    // has an authority for the agent; otherwise the legacy v1 path (DID-signed
+    // when a DID is configured).
+    let workloadToken = null;
+    let path = options.path;
+    if (credentials.workloadPrivateKey && V3_PATHS[options.path]) {
+        try {
+            const auth = await (0, workload_identity_1.getWorkloadAuth)(workloadHttpFor(ctx.helpers, timeoutMs), {
+                apiUrl: credentials.openboxUrl,
+                apiKey: credentials.apiKey,
+                privateKeyPem: credentials.workloadPrivateKey,
+                coreHeaders: (0, signing_1.buildSignedHeaders)('GET', '/api/v3/auth/bootstrap', Buffer.alloc(0), credentials.apiKey),
+            }, (document) => (0, ignored_urls_1.addIgnoredPrefix)(document.issuer));
+            if (auth) {
+                workloadToken = auth.token;
+                path = V3_PATHS[options.path];
+            }
+        }
+        catch (err) {
+            if (err instanceof workload_identity_1.WorkloadIdentityError)
+                throw toGovernanceError(err);
+            throw err;
+        }
+    }
+    const url = `${credentials.openboxUrl}${path}`;
+    const headers = workloadToken != null
+        ? {
+            ...(0, signing_1.buildSignedHeaders)(options.method, path, bodyBytes, credentials.apiKey),
+            [workload_identity_1.WORKLOAD_TOKEN_HEADER]: workloadToken,
+        }
+        : (0, signing_1.buildSignedHeaders)(options.method, path, bodyBytes, credentials.apiKey, credentials.agentDid, credentials.agentPrivateKey);
     if (options.traceId) {
         headers['X-OpenBox-Trace-Id'] = options.traceId;
     }
@@ -37,7 +110,7 @@ async function openboxRequest(ctx, options) {
         url,
         headers,
         json: false,
-        timeout: options.timeoutMs ?? OPENBOX_TIMEOUT_MS,
+        timeout: timeoutMs,
         body: bodyBytes.length > 0 ? bodyBytes : undefined,
         qs: options.qs,
         returnFullResponse: false,
@@ -56,6 +129,12 @@ async function openboxRequest(ctx, options) {
         if (statusCode === 401 || statusCode === 403) {
             // Auth/signing failures always hard-fail, regardless of onApiError —
             // a revoked/invalid key must never silently degrade to "run ungoverned".
+            // On v3 the token this request carried is discarded (Core does not tell
+            // an expired token from a changed authority) and the request is not
+            // replayed; the next one bootstraps again.
+            if (workloadToken != null && credentials.workloadPrivateKey) {
+                (0, workload_identity_1.invalidateWorkloadToken)({ apiUrl: credentials.openboxUrl, apiKey: credentials.apiKey, privateKeyPem: credentials.workloadPrivateKey }, workloadToken);
+            }
             throw new GovernanceAuthError(err instanceof Error ? err.message : String(err), statusCode, err);
         }
         throw new SoftGovernanceError(err instanceof Error ? err.message : String(err), err);

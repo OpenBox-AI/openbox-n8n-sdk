@@ -54,6 +54,15 @@ export class OpenBoxApi implements ICredentialType {
       description:
         'Optional. Base64-encoded raw 32-byte Ed25519 seed. Every request is signed locally with this key. Required for agents with signing_required=true. Pair with Agent DID.',
     },
+    {
+      displayName: 'Workload Private Key',
+      name: 'workloadPrivateKey',
+      type: 'string',
+      typeOptions: { password: true },
+      default: '',
+      description:
+        'Optional. RSA private key (PEM) of the agent workload identity, for the OpenBox v3 API. When set, requests carry a short-lived workload token instead of a DID signature. Escaped line breaks from an env file are accepted too.',
+    },
   ];
 
   test: ICredentialTestRequest = {
@@ -99,6 +108,8 @@ export interface OpenBoxCredentials {
   apiKey: string;
   agentDid?: string;
   agentPrivateKey?: string;
+  /** RSA PEM for v3 workload identity; takes precedence over DID signing. */
+  workloadPrivateKey?: string;
 }
 
 export function normalizeOpenBoxCredentials(
@@ -116,5 +127,8 @@ export function normalizeOpenBoxCredentials(
     apiKey,
     agentDid: raw.agentDid ? String(raw.agentDid) : undefined,
     agentPrivateKey: raw.agentPrivateKey ? String(raw.agentPrivateKey) : undefined,
+    workloadPrivateKey: raw.workloadPrivateKey && String(raw.workloadPrivateKey).trim()
+      ? String(raw.workloadPrivateKey)
+      : undefined,
   };
 }

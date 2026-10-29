@@ -21,13 +21,17 @@
  *      → mirrors span_processor.clear_activity_context()
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.ROUTING_DRAIN_CAP_MS = exports.shouldIgnore = exports.addIgnoredPrefix = void 0;
 exports.trackSpanSend = trackSpanSend;
 exports.drainSpanSends = drainSpanSends;
-exports.addIgnoredPrefix = addIgnoredPrefix;
-exports.shouldIgnore = shouldIgnore;
 exports.buildHttpSpanData = buildHttpSpanData;
 exports.evaluateActivitySpan = evaluateActivitySpan;
 exports.getCurrentActivityId = getCurrentActivityId;
+exports.routingProvenanceEnabled = routingProvenanceEnabled;
+exports.isOpenRouterModelCall = isOpenRouterModelCall;
+exports.extractGenerationId = extractGenerationId;
+exports.buildProvenanceSpanData = buildProvenanceSpanData;
+exports.drainRoutingAttestations = drainRoutingAttestations;
 exports.setupSpanProcessorInstrumentation = setupSpanProcessorInstrumentation;
 exports.registerActivity = registerActivity;
 exports.runWithActivity = runWithActivity;
@@ -47,6 +51,8 @@ const _timersMod = 'timers';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { setTimeout: _st } = require(_timersMod);
 const openbox_client_1 = require("../openbox-client");
+const ignored_urls_1 = require("../ignored-urls");
+const provenance_1 = require("./provenance");
 const error_info_1 = require("./error-info");
 const client_1 = require("./client");
 const types_1 = require("./types");
@@ -107,23 +113,9 @@ let _httpModulesPatched = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _originalFetch = null;
 // ── Ignored URL prefixes (Core API itself, to avoid infinite loops) ────────────
-const _ignoredPrefixes = [
-    'https://core.openbox.ai',
-    'http://core.openbox.ai',
-];
-/**
- * Register an extra URL prefix to ignore (e.g. a self-hosted OpenBox URL).
- * Called once at middleware construction time.
- */
-function addIgnoredPrefix(prefix) {
-    const normalised = prefix.replace(/\/+$/, '');
-    if (!_ignoredPrefixes.includes(normalised)) {
-        _ignoredPrefixes.push(normalised);
-    }
-}
-function shouldIgnore(url) {
-    return _ignoredPrefixes.some((p) => url.startsWith(p));
-}
+var ignored_urls_2 = require("../ignored-urls");
+Object.defineProperty(exports, "addIgnoredPrefix", { enumerable: true, get: function () { return ignored_urls_2.addIgnoredPrefix; } });
+Object.defineProperty(exports, "shouldIgnore", { enumerable: true, get: function () { return ignored_urls_2.shouldIgnore; } });
 // ── LLM provider detection (gen_ai.system per OTel semantic conventions) ────
 const LLM_PROVIDERS = [
     { host: 'api.openai.com', system: 'openai' },
@@ -227,7 +219,9 @@ function buildHttpSpanData(opts) {
     };
 }
 // ── Evaluate helper (fire-and-forget — mirrors hook_governance.evaluate_async) ──
-async function evaluateHookSpan(entry, spanData) {
+async function evaluateHookSpan(entry, spanData, 
+/** False for evidence about work already done (provenance): sent, not gated. */
+enforce = true) {
     if (isDuplicateSpan(entry.ctx.activity_id, spanData))
         return;
     // event_type stays 'ActivityStarted' for BOTH stages — deliberately. A hook
@@ -255,7 +249,7 @@ async function evaluateHookSpan(entry, spanData) {
         // Span is always sent to Core so it shows on the dashboard.
         // For already-approved activities, skip verdict enforcement — enforcing would
         // create spurious approval rows. The ToolStarted approval covers the full call.
-        if (!_approvedActivities.has(entry.ctx.activity_id)) {
+        if (enforce && !_approvedActivities.has(entry.ctx.activity_id)) {
             await enforceHookVerdict(entry, response, String(spanData.http_url ?? spanData.name ?? 'hook'));
         }
     }
@@ -291,7 +285,9 @@ function isDuplicateSpan(activityId, spanData) {
         ? [spanData.http_method, spanData.http_url, spanData.http_status_code ?? '']
         : hookType === 'db_query'
             ? [spanData.db_system, spanData.db_statement, spanData.rowcount ?? '']
-            : [spanData.file_path, spanData.file_operation];
+            : hookType === 'llm_provenance'
+                ? [spanData.attributes?.['gen_ai.generation.id']]
+                : [spanData.file_path, spanData.file_operation];
     const key = [activityId, spanData.stage, hookType, ...identity].join('|');
     const seenAt = _recentSpans.get(key);
     if (seenAt != null && now - seenAt <= _recentSpanTtlMs) {
@@ -381,6 +377,9 @@ async function pollHookApproval(entry, activityId, activityType, approvalId) {
             continue;
         }
         const verdict = (0, verdict_1.verdictFromString)(rawVerdict);
+        if (verdict !== 'require_approval' && (0, verdict_1.isDecisionForAnotherApproval)(response, approvalId)) {
+            throw abortAndThrow(activityId, `OpenBox returned the decision for approval ${String(response.approval_id ?? response.id)} instead of ${approvalId}`);
+        }
         if (verdict === 'allow')
             return;
         if (verdict === 'block' || verdict === 'halt') {
@@ -396,17 +395,17 @@ async function enforceHookVerdict(entry, response, identifier) {
     const activityId = entry.ctx.activity_id;
     const verdict = (0, verdict_1.verdictFromString)(response.verdict ?? response.arm ?? response.action);
     if (verdict === 'require_approval') {
-        const approvalId = response.approval_id ?? response.approvalId ?? response.id;
-        await pollHookApproval(entry, activityId, entry.ctx.activity_type, approvalId);
+        await pollHookApproval(entry, activityId, entry.ctx.activity_type, (0, verdict_1.awaitedApprovalId)(response));
         // Approved — mark so a subsequent hook span or the ToolCompleted/LLMCompleted
         // event-level check doesn't ask Core for approval a second time.
         markActivityApproved(activityId);
         return;
     }
     if (verdict === 'block' || verdict === 'halt') {
-        const reason = response.reason ?? 'Blocked by governance';
+        const patch = (0, verdict_1.patchFrom)(response);
+        const reason = (0, verdict_1.withPatchHint)(response.reason ?? 'Blocked by governance', patch);
         _activityAbort.set(activityId, reason);
-        throw new verdict_1.GovernanceBlockedError(verdict, `${reason} (${identifier})`);
+        throw new verdict_1.GovernanceBlockedError(verdict, `${reason} (${identifier})`, patch);
     }
 }
 function patchFetch() {
@@ -448,7 +447,7 @@ function patchFetch() {
                 return '';
             }
         })();
-        if (!urlStr || shouldIgnore(urlStr)) {
+        if (!urlStr || (0, ignored_urls_1.shouldIgnore)(urlStr)) {
             return captured(input, init);
         }
         // Only ever set for a terminal block/halt verdict now — require_approval is
@@ -503,9 +502,213 @@ function patchFetch() {
         // until approved/rejected rather than throwing, so the response is only
         // ever returned once the verdict is settled. block/halt still throw and
         // discard this response immediately.
+        noteOpenRouterCall(activityId, {
+            url: urlStr,
+            requestBody,
+            responseBody,
+            generationIdHeader: headerValue(response?.headers, 'x-generation-id'),
+            authorization: requestAuthorization(input, init),
+        });
         await evaluateHookSpan(entry, buildHttpSpanData({ activityId, method, url: urlStr, stage: 'completed', requestBody, responseBody, statusCode: response?.status ?? null, startMs, endMs }));
         return response;
     };
+}
+// ── OpenRouter routing provenance ─────────────────────────────────────────────
+//
+// OpenRouter decides per call which upstream provider serves a model request,
+// and publishes the answer at GET /api/v1/generation?id=<gen-id>: provider,
+// region, cost, tokens, fallback attempts. For every OpenRouter call made in a
+// governed activity, that record is read after the activity closes and sent as
+// an `llm_provenance` span on it (as the OpenRouter TS SDK does), so it lands
+// inside the session before WorkflowCompleted. The lookup uses the caller's own
+// OpenRouter key, read off the call; set OPENBOX_OPENROUTER_PROVENANCE=false to
+// turn it off.
+const _procMod = 'process';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const _env = require(_procMod).env;
+/** Cap on how long a run's close waits for outstanding provenance. */
+exports.ROUTING_DRAIN_CAP_MS = 12_000;
+/** Model calls whose provenance is due once their activity closes, by activity. */
+const _pendingRouting = new Map();
+/** Lookups in flight; a run drains them before it closes. */
+const _routingJobs = new Set();
+function routingProvenanceEnabled() {
+    const value = (_env.OPENBOX_OPENROUTER_PROVENANCE ?? '').trim().toLowerCase();
+    return !['0', 'false', 'no', 'off'].includes(value);
+}
+/** An OpenRouter model call (not the generation lookup itself). */
+function isOpenRouterModelCall(url) {
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        return (host === 'openrouter.ai' || host.endsWith('.openrouter.ai'))
+            && !parsed.pathname.startsWith('/api/v1/generation');
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * The OpenRouter generation id of a response: the `x-generation-id` header,
+ * else the `id` of a JSON body or of an SSE stream's frames (`gen-…` only —
+ * anything else is a provider id that cannot be looked up).
+ */
+function extractGenerationId(header, responseBody) {
+    if (header && header.trim())
+        return header.trim();
+    if (responseBody == null)
+        return null;
+    const candidates = [responseBody];
+    for (const line of responseBody.split(/\r?\n/)) {
+        if (line.startsWith('data:'))
+            candidates.push(line.slice(5).trim());
+    }
+    for (const candidate of candidates) {
+        try {
+            const id = JSON.parse(candidate)?.id;
+            if (typeof id === 'string' && id.startsWith('gen-'))
+                return id;
+        }
+        catch { /* not JSON, or a partial frame */ }
+    }
+    return null;
+}
+function headerValue(headers, name) {
+    if (headers == null)
+        return null;
+    try {
+        const getter = headers.get;
+        if (typeof getter === 'function') {
+            const v = getter.call(headers, name);
+            return typeof v === 'string' ? v : null;
+        }
+        if (Array.isArray(headers)) {
+            const hit = headers.find((pair) => Array.isArray(pair) && String(pair[0]).toLowerCase() === name);
+            return hit ? String(hit[1]) : null;
+        }
+        if (typeof headers === 'object') {
+            for (const [k, v] of Object.entries(headers)) {
+                if (k.toLowerCase() === name)
+                    return Array.isArray(v) ? String(v[0]) : v == null ? null : String(v);
+            }
+        }
+    }
+    catch { /* best effort */ }
+    return null;
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function requestAuthorization(input, init) {
+    return headerValue(init?.headers, 'authorization') ?? headerValue(input?.headers, 'authorization');
+}
+function bearerKey(authorization) {
+    const match = /^Bearer\s+(.+)$/i.exec(authorization ?? '');
+    return match ? match[1].trim() : null;
+}
+/** Remember an OpenRouter call so its provenance is collected when its activity closes. */
+function noteOpenRouterCall(activityId, call) {
+    if (!routingProvenanceEnabled() || !isOpenRouterModelCall(call.url))
+        return;
+    const entry = _activeActivities.get(activityId);
+    const apiKey = bearerKey(call.authorization);
+    const generationId = extractGenerationId(call.generationIdHeader, call.responseBody);
+    if (entry == null || apiKey == null || generationId == null)
+        return;
+    const list = _pendingRouting.get(activityId) ?? [];
+    list.push({
+        generationId,
+        responseBody: call.responseBody,
+        requested: (0, provenance_1.extractRequestedRouting)(call.requestBody),
+        requestedModel: (0, provenance_1.extractRequestedModel)(call.requestBody),
+        apiKey,
+        baseUrl: new URL(call.url).origin,
+        entry,
+    });
+    _pendingRouting.set(activityId, list);
+}
+/** The `llm_provenance` span for one record, shaped as the OpenRouter TS SDK sends it. */
+function buildProvenanceSpanData(activityId, record, 
+/** Where the record came from: OpenRouter's generation record, or the model response. */
+source = 'generation_record') {
+    const nowNs = Date.now() * 1_000_000;
+    return {
+        span_id: (0, types_1.stableSpanId)(`${activityId}|routing|${record.generationId}`),
+        trace_id: (0, types_1.stableSpanId)(`${activityId}|routing-trace|${record.generationId}`) +
+            (0, types_1.stableSpanId)(`${activityId}|routing-trace2|${record.generationId}`),
+        parent_span_id: null,
+        // OpenRouter's record of who actually served the call.
+        name: `served by ${record.provider ?? 'an unreported provider'}${record.model != null ? ` (${record.model})` : ''}`,
+        kind: 'CLIENT',
+        stage: 'completed',
+        start_time: nowNs,
+        end_time: nowNs,
+        duration_ns: record.latencyMs != null ? record.latencyMs * 1_000_000 : null,
+        attributes: { ...(0, provenance_1.provenanceAttributes)(record), 'openbox.provenance.source': source },
+        status: { code: 'OK', description: null },
+        events: [],
+        hook_type: 'llm_provenance',
+        semantic_type: 'llm_provenance',
+        gen_ai_system: record.provider ?? 'openrouter',
+        activity_id: activityId,
+    };
+}
+/**
+ * Start collecting the provenance of an activity's OpenRouter calls, in the
+ * background. The record lags the response by a moment, so it is read after
+ * the activity closes rather than on the call's path; the span is sent with
+ * the activity's own context.
+ */
+function beginRoutingAttestation(activityId) {
+    const pending = _pendingRouting.get(activityId);
+    _pendingRouting.delete(activityId);
+    if (pending == null || !routingProvenanceEnabled())
+        return;
+    for (const call of pending) {
+        const job = (async () => {
+            const fromRecord = await (0, provenance_1.fetchGenerationRecord)(call.generationId, call.requested, {
+                apiKey: call.apiKey,
+                baseUrl: call.baseUrl,
+                // The original fetch: our own lookup must never be traced.
+                fetchImpl: _originalFetch ?? undefined,
+            }, call.requestedModel);
+            // OpenRouter can take half a minute to publish the record; the response
+            // itself still says which model and provider served the call, and what
+            // it cost.
+            const record = fromRecord
+                ?? (0, provenance_1.recordFromResponse)(call.generationId, call.responseBody, call.requested, call.requestedModel);
+            if (record == null) {
+                call.entry.logger.warn(`routing provenance unavailable for ${call.generationId}: no generation record in time and no readable response`);
+                return null;
+            }
+            await evaluateHookSpan(call.entry, buildProvenanceSpanData(activityId, record, fromRecord != null ? 'generation_record' : 'response'), false).catch(() => { });
+            return record;
+        })();
+        _routingJobs.add(job);
+        void job.catch(() => null).finally(() => _routingJobs.delete(job));
+    }
+}
+/**
+ * Wait for outstanding provenance, capped: a record that never appears must
+ * not hold a run open. Called before a run closes, so the evidence is part of
+ * the session.
+ */
+async function drainRoutingAttestations(capMs = exports.ROUTING_DRAIN_CAP_MS) {
+    if (_routingJobs.size === 0)
+        return;
+    let settled = false;
+    await Promise.race([
+        Promise.allSettled([..._routingJobs]).then(() => {
+            settled = true;
+        }),
+        new Promise((resolve) => {
+            const tick = (left) => {
+                if (settled || left <= 0)
+                    resolve();
+                else
+                    _st(() => tick(left - 100), 100);
+            };
+            tick(capMs);
+        }),
+    ]);
 }
 function patchHttpModules() {
     if (_httpModulesPatched)
@@ -536,7 +739,7 @@ function patchHttpModule(moduleName) {
             const reqBodyChunks = [];
             const method = extractHttpMethod(args);
             const url = extractHttpUrl(moduleName, args);
-            if (!url || shouldIgnore(url))
+            if (!url || (0, ignored_urls_1.shouldIgnore)(url))
                 return Reflect.apply(originalRequest, this, args);
             const callbackIndex = args.findIndex((arg) => typeof arg === 'function');
             const originalCallback = callbackIndex >= 0 ? args[callbackIndex] : null;
@@ -579,6 +782,13 @@ function patchHttpModule(moduleName) {
                         const endMs = Date.now();
                         const requestBody = chunksToText(reqBodyChunks);
                         const responseBody = chunksToText(responseChunks);
+                        noteOpenRouterCall(activityId, {
+                            url,
+                            requestBody,
+                            responseBody,
+                            generationIdHeader: headerValue(response.headers, 'x-generation-id'),
+                            authorization: headerValue(args.find((arg) => arg && typeof arg === 'object' && 'headers' in arg)?.headers, 'authorization'),
+                        });
                         // Governance is the gate for handing the response to the caller — mirrors
                         // patchFetch's "completed" check, where the response is only ever returned
                         // once the verdict is settled. This used to be `void evaluateHookSpan(...)`
@@ -837,6 +1047,7 @@ async function unregisterActivity(activityId) {
         await drainSpanSends(activityId);
     }
     catch { /* individual sends already fail-open */ }
+    beginRoutingAttestation(activityId);
     _activeActivities.delete(activityId);
     _activityAbort.delete(activityId);
     _approvedActivities.delete(activityId);
@@ -853,6 +1064,7 @@ function unregisterWorkflow(workflowId) {
     for (const [activityId, entry] of _activeActivities) {
         if (entry.ctx.workflow_id === workflowId) {
             _activeActivities.delete(activityId);
+            _pendingRouting.delete(activityId);
             _activityAbort.delete(activityId);
             _approvedActivities.delete(activityId);
         }

@@ -36,10 +36,17 @@ async function pollApprovalOrHalt(mw, turn, activityId, activityType, approvalId
             continue;
         }
         const verdict = (0, verdict_1.verdictFromString)(rawVerdict);
+        // A final decision for another approval of this activity is never acted
+        // on: failing safe beats approving what a human rejected.
+        if (verdict !== 'require_approval' && (0, verdict_1.isDecisionForAnotherApproval)(response, approvalId)) {
+            throw new verdict_1.GovernanceHaltError(`OpenBox returned the decision for approval ${String(response.approval_id ?? response.id)} instead of ${approvalId}`);
+        }
         if (verdict === 'allow')
             return;
         if (verdict === 'block' || verdict === 'halt') {
-            throw new verdict_1.GovernanceHaltError((0, verdict_1.formatActivityRejectedMessage)(response.reason));
+            // A rejection stays terminal; the directive is still carried in the
+            // message for whoever reads the trail.
+            throw new verdict_1.GovernanceHaltError((0, verdict_1.withPatchHint)((0, verdict_1.formatActivityRejectedMessage)(response.reason), (0, verdict_1.patchFrom)(response)));
         }
         await sleep(mw._config.hitl.pollIntervalMs);
     }

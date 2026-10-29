@@ -71,3 +71,22 @@ describe('unwrapGovernanceError', () => {
     expect(unwrapGovernanceError(a)).toBeNull();
   });
 });
+
+describe('BLOCK patch directive', () => {
+  it('carries the suggested input in the error message and on the error', async () => {
+    const { GovernanceBlockedError: Blocked, enforceVerdict: enforce } = await import('../shared/langchain/verdict');
+    try {
+      enforce({ verdict: 'block', reason: 'refund above limit', patch: { new_input: { amount: 100 } } }, 'tool_start');
+      throw new Error('expected a block');
+    } catch (err) {
+      expect(err).toBeInstanceOf(Blocked);
+      expect((err as Error).message).toContain('policy suggests retrying with: {"amount":100}');
+      expect((err as InstanceType<typeof Blocked>).patch).toEqual({ new_input: { amount: 100 } });
+    }
+  });
+
+  it('leaves the message alone without a usable patch', async () => {
+    const { enforceVerdict: enforce } = await import('../shared/langchain/verdict');
+    expect(() => enforce({ verdict: 'block', reason: 'no', patch: [] as never }, 'tool_start')).toThrow(/block at tool_start: no$/);
+  });
+});
