@@ -616,6 +616,7 @@ function noteOpenRouterCall(activityId, call) {
     const list = _pendingRouting.get(activityId) ?? [];
     list.push({
         generationId,
+        responseBody: call.responseBody,
         requested: (0, provenance_1.extractRequestedRouting)(call.requestBody),
         requestedModel: (0, provenance_1.extractRequestedModel)(call.requestBody),
         apiKey,
@@ -625,7 +626,9 @@ function noteOpenRouterCall(activityId, call) {
     _pendingRouting.set(activityId, list);
 }
 /** The `llm_provenance` span for one record, shaped as the OpenRouter TS SDK sends it. */
-function buildProvenanceSpanData(activityId, record) {
+function buildProvenanceSpanData(activityId, record, 
+/** Where the record came from: OpenRouter's generation record, or the model response. */
+source = 'generation_record') {
     const nowNs = Date.now() * 1_000_000;
     return {
         span_id: (0, types_1.stableSpanId)(`${activityId}|routing|${record.generationId}`),
@@ -639,7 +642,7 @@ function buildProvenanceSpanData(activityId, record) {
         start_time: nowNs,
         end_time: nowNs,
         duration_ns: record.latencyMs != null ? record.latencyMs * 1_000_000 : null,
-        attributes: (0, provenance_1.provenanceAttributes)(record),
+        attributes: { ...(0, provenance_1.provenanceAttributes)(record), 'openbox.provenance.source': source },
         status: { code: 'OK', description: null },
         events: [],
         hook_type: 'llm_provenance',
@@ -661,18 +664,22 @@ function beginRoutingAttestation(activityId) {
         return;
     for (const call of pending) {
         const job = (async () => {
-            const record = await (0, provenance_1.fetchGenerationRecord)(call.generationId, call.requested, {
+            const fromRecord = await (0, provenance_1.fetchGenerationRecord)(call.generationId, call.requested, {
                 apiKey: call.apiKey,
                 baseUrl: call.baseUrl,
                 // The original fetch: our own lookup must never be traced.
                 fetchImpl: _originalFetch ?? undefined,
             }, call.requestedModel);
+            // OpenRouter can take half a minute to publish the record; the response
+            // itself still says which model and provider served the call, and what
+            // it cost.
+            const record = fromRecord
+                ?? (0, provenance_1.recordFromResponse)(call.generationId, call.responseBody, call.requested, call.requestedModel);
             if (record == null) {
-                call.entry.logger.warn(`routing provenance unavailable for ${call.generationId}: the generation record did not appear in time`);
+                call.entry.logger.warn(`routing provenance unavailable for ${call.generationId}: no generation record in time and no readable response`);
                 return null;
             }
-            await evaluateHookSpan(call.entry, buildProvenanceSpanData(activityId, record), false)
-                .catch(() => { });
+            await evaluateHookSpan(call.entry, buildProvenanceSpanData(activityId, record, fromRecord != null ? 'generation_record' : 'response'), false).catch(() => { });
             return record;
         })();
         _routingJobs.add(job);

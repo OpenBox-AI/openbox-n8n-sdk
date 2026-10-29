@@ -38,6 +38,8 @@ const GENERATION_RECORD = {
 };
 
 const lookups: Array<{ url: string; authorization: string | null }> = [];
+/** Whether OpenRouter has published the generation record yet. */
+let recordPublished = true;
 
 function json(body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', ...headers } });
@@ -49,7 +51,7 @@ beforeAll(() => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.startsWith('https://openrouter.ai/api/v1/generation')) {
       lookups.push({ url, authorization: new Headers(init?.headers).get('authorization') });
-      return json(GENERATION_RECORD);
+      return recordPublished ? json(GENERATION_RECORD) : new Response('{}', { status: 404 });
     }
     return json(COMPLETION, { 'x-generation-id': 'gen-123' });
   }));
@@ -78,6 +80,7 @@ describe('OpenRouter provenance helpers', () => {
 describe('provenance span', () => {
   it('is sent for an OpenRouter call once its activity closes', async () => {
     const coreCalls: Array<Record<string, unknown>> = [];
+    recordPublished = true;
     const executeFunctions = {
       getCredentials: async () => ({ apiKey: 'obx_live_test' }),
       getNode: () => ({ name: 'OpenBox Agent' }),
@@ -140,6 +143,53 @@ describe('provenance span', () => {
       'gen_ai.generation.id': 'gen-123',
       'gen_ai.upstream.provider': 'OpenAI',
       'gen_ai.upstream.data_region': 'us',
+      'openbox.provenance.source': 'generation_record',
     });
   });
+
+  it('falls back to the response when OpenRouter has not published the record yet', async () => {
+    recordPublished = false;
+    const coreCalls: Array<Record<string, unknown>> = [];
+    const executeFunctions = {
+      getCredentials: async () => ({ apiKey: 'obx_live_test' }),
+      getNode: () => ({ name: 'OpenBox Agent' }),
+      helpers: {
+        httpRequest: vi.fn(async (options: { body?: Buffer }) => {
+          coreCalls.push(JSON.parse(options.body!.toString('utf-8')) as Record<string, unknown>);
+          return JSON.stringify({ verdict: 'allow' });
+        }),
+      },
+    };
+    const config = mergeConfig({});
+    registerActivity(
+      'act-late',
+      {
+        source: 'workflow-telemetry', workflow_id: 'wf-2', run_id: 'run-2', workflow_type: 'n8n.Agent.Test',
+        task_queue: 'n8n', session_id: undefined, event_type: 'ActivityStarted', activity_id: 'act-late', activity_type: 'llm_call',
+      },
+      executeFunctions as never,
+      'wf-2',
+      { hitl: config.hitl, onApiError: 'fail_open', logger: config.logger, requestTimeoutMs: 1000 },
+    );
+    const response = await runWithActivity('act-late', () =>
+      fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-or-test' },
+        body: JSON.stringify({ model: 'openai/gpt-4o-mini', messages: [] }),
+      }),
+    );
+    await response.json();
+    await unregisterActivity('act-late');
+    await drainRoutingAttestations();
+
+    const provenance = (coreCalls.at(-1)!.spans as Array<Record<string, unknown>>)[0];
+    expect(provenance.hook_type).toBe('llm_provenance');
+    expect(provenance.attributes).toMatchObject({
+      'gen_ai.generation.id': 'gen-123',
+      'gen_ai.upstream.provider': 'OpenAI',
+      'gen_ai.response.model': 'openai/gpt-4o-mini',
+      'gen_ai.usage.tokens_prompt': 40,
+      'openbox.provenance.source': 'response',
+    });
+  }, 30_000);
 });

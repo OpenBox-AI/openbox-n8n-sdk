@@ -39,6 +39,7 @@ exports.extractRequestedModel = extractRequestedModel;
 exports.readRequestedModel = readRequestedModel;
 exports.isModelHonored = isModelHonored;
 exports.normalizeGenerationRecord = normalizeGenerationRecord;
+exports.recordFromResponse = recordFromResponse;
 exports.fetchGenerationRecord = fetchGenerationRecord;
 exports.provenanceAttributes = provenanceAttributes;
 // setTimeout via require, as elsewhere in this package (n8n's community-node
@@ -234,6 +235,52 @@ function normalizeGenerationRecord(generationId, raw, requested, requestedModel 
         regionHonored: (0, residency_1.isRegionApproved)(dataRegion, residency),
         ownKeyHonored: (0, residency_1.isOwnKeyHonored)(isByok, residency),
     };
+}
+/**
+ * Provenance read off the model response itself, for when OpenRouter's
+ * generation record has not been published in time (it can lag the response
+ * by half a minute). The response carries the generation id, the model and
+ * provider that served it, token usage and cost; region and fallback attempts
+ * exist only in the record. Accepts a JSON body or an SSE stream (the frames'
+ * envelope fields, and usage from the last frame that has it).
+ */
+function recordFromResponse(generationId, responseBody, requested, requestedModel = null) {
+    if (responseBody == null)
+        return null;
+    const frames = [];
+    const text = responseBody.trim();
+    const tryParse = (raw) => {
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                frames.push(parsed);
+            }
+        }
+        catch { /* a partial frame */ }
+    };
+    if (text.startsWith('{')) {
+        tryParse(text);
+    }
+    else {
+        for (const line of text.split(/\r?\n/)) {
+            if (line.startsWith('data:'))
+                tryParse(line.slice(5).trim());
+        }
+    }
+    if (frames.length === 0)
+        return null;
+    const pick = (key) => frames.map((f) => f[key]).find((v) => v != null);
+    const usage = ([...frames].reverse().map((f) => f.usage).find((u) => u != null && typeof u === 'object') ??
+        {});
+    const choices = [...frames].reverse().map((f) => f.choices).find((c) => Array.isArray(c) && c.length > 0);
+    return normalizeGenerationRecord(generationId, {
+        model: pick('model'),
+        provider_name: pick('provider'),
+        tokens_prompt: usage.prompt_tokens,
+        tokens_completion: usage.completion_tokens,
+        total_cost: usage.cost,
+        finish_reason: choices?.[0]?.finish_reason,
+    }, requested, requestedModel);
 }
 /**
  * Fetch the generation record for one model call.

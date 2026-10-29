@@ -345,6 +345,61 @@ export interface FetchProvenanceOptions {
 }
 
 /**
+ * Provenance read off the model response itself, for when OpenRouter's
+ * generation record has not been published in time (it can lag the response
+ * by half a minute). The response carries the generation id, the model and
+ * provider that served it, token usage and cost; region and fallback attempts
+ * exist only in the record. Accepts a JSON body or an SSE stream (the frames'
+ * envelope fields, and usage from the last frame that has it).
+ */
+export function recordFromResponse(
+  generationId: string,
+  responseBody: string | null,
+  requested: RequestedRouting | null,
+  requestedModel: string | null = null,
+): RoutingProvenance | null {
+  if (responseBody == null) return null;
+  const frames: Record<string, unknown>[] = [];
+  const text = responseBody.trim();
+  const tryParse = (raw: string) => {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        frames.push(parsed as Record<string, unknown>);
+      }
+    } catch { /* a partial frame */ }
+  };
+  if (text.startsWith('{')) {
+    tryParse(text);
+  } else {
+    for (const line of text.split(/\r?\n/)) {
+      if (line.startsWith('data:')) tryParse(line.slice(5).trim());
+    }
+  }
+  if (frames.length === 0) return null;
+
+  const pick = (key: string): unknown => frames.map((f) => f[key]).find((v) => v != null);
+  const usage = ([...frames].reverse().map((f) => f.usage).find((u) => u != null && typeof u === 'object') ??
+    {}) as Record<string, unknown>;
+  const choices = [...frames].reverse().map((f) => f.choices).find((c) => Array.isArray(c) && c.length > 0) as
+    | Array<Record<string, unknown>>
+    | undefined;
+  return normalizeGenerationRecord(
+    generationId,
+    {
+      model: pick('model'),
+      provider_name: pick('provider'),
+      tokens_prompt: usage.prompt_tokens,
+      tokens_completion: usage.completion_tokens,
+      total_cost: usage.cost,
+      finish_reason: choices?.[0]?.finish_reason,
+    },
+    requested,
+    requestedModel,
+  );
+}
+
+/**
  * Fetch the generation record for one model call.
  *
  * Returns null rather than throwing: provenance is evidence, and failing to
