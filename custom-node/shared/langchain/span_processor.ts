@@ -33,6 +33,7 @@ const _timersMod = 'timers';
 const { setTimeout: _st } = require(_timersMod) as typeof import('timers');
 
 import { openboxRequest, GovernanceAuthError, SoftGovernanceError } from '../openbox-client';
+import { shouldIgnore } from '../ignored-urls';
 import { safeString } from './error-info';
 import { GovernanceClient, OnApiError } from './client';
 import type { HITLConfig, Logger } from './config';
@@ -129,25 +130,7 @@ let _originalFetch: ((...args: any[]) => Promise<any>) | null = null;
 
 // ── Ignored URL prefixes (Core API itself, to avoid infinite loops) ────────────
 
-const _ignoredPrefixes: string[] = [
-  'https://core.openbox.ai',
-  'http://core.openbox.ai',
-];
-
-/**
- * Register an extra URL prefix to ignore (e.g. a self-hosted OpenBox URL).
- * Called once at middleware construction time.
- */
-export function addIgnoredPrefix(prefix: string): void {
-  const normalised = prefix.replace(/\/+$/, '');
-  if (!_ignoredPrefixes.includes(normalised)) {
-    _ignoredPrefixes.push(normalised);
-  }
-}
-
-export function shouldIgnore(url: string): boolean {
-  return _ignoredPrefixes.some((p) => url.startsWith(p));
-}
+export { addIgnoredPrefix, shouldIgnore } from '../ignored-urls';
 
 // ── LLM provider detection (gen_ai.system per OTel semantic conventions) ────
 

@@ -21,10 +21,9 @@
  *      → mirrors span_processor.clear_activity_context()
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.shouldIgnore = exports.addIgnoredPrefix = void 0;
 exports.trackSpanSend = trackSpanSend;
 exports.drainSpanSends = drainSpanSends;
-exports.addIgnoredPrefix = addIgnoredPrefix;
-exports.shouldIgnore = shouldIgnore;
 exports.buildHttpSpanData = buildHttpSpanData;
 exports.evaluateActivitySpan = evaluateActivitySpan;
 exports.getCurrentActivityId = getCurrentActivityId;
@@ -47,6 +46,7 @@ const _timersMod = 'timers';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { setTimeout: _st } = require(_timersMod);
 const openbox_client_1 = require("../openbox-client");
+const ignored_urls_1 = require("../ignored-urls");
 const error_info_1 = require("./error-info");
 const client_1 = require("./client");
 const types_1 = require("./types");
@@ -107,23 +107,9 @@ let _httpModulesPatched = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _originalFetch = null;
 // ── Ignored URL prefixes (Core API itself, to avoid infinite loops) ────────────
-const _ignoredPrefixes = [
-    'https://core.openbox.ai',
-    'http://core.openbox.ai',
-];
-/**
- * Register an extra URL prefix to ignore (e.g. a self-hosted OpenBox URL).
- * Called once at middleware construction time.
- */
-function addIgnoredPrefix(prefix) {
-    const normalised = prefix.replace(/\/+$/, '');
-    if (!_ignoredPrefixes.includes(normalised)) {
-        _ignoredPrefixes.push(normalised);
-    }
-}
-function shouldIgnore(url) {
-    return _ignoredPrefixes.some((p) => url.startsWith(p));
-}
+var ignored_urls_2 = require("../ignored-urls");
+Object.defineProperty(exports, "addIgnoredPrefix", { enumerable: true, get: function () { return ignored_urls_2.addIgnoredPrefix; } });
+Object.defineProperty(exports, "shouldIgnore", { enumerable: true, get: function () { return ignored_urls_2.shouldIgnore; } });
 // ── LLM provider detection (gen_ai.system per OTel semantic conventions) ────
 const LLM_PROVIDERS = [
     { host: 'api.openai.com', system: 'openai' },
@@ -448,7 +434,7 @@ function patchFetch() {
                 return '';
             }
         })();
-        if (!urlStr || shouldIgnore(urlStr)) {
+        if (!urlStr || (0, ignored_urls_1.shouldIgnore)(urlStr)) {
             return captured(input, init);
         }
         // Only ever set for a terminal block/halt verdict now — require_approval is
@@ -536,7 +522,7 @@ function patchHttpModule(moduleName) {
             const reqBodyChunks = [];
             const method = extractHttpMethod(args);
             const url = extractHttpUrl(moduleName, args);
-            if (!url || shouldIgnore(url))
+            if (!url || (0, ignored_urls_1.shouldIgnore)(url))
                 return Reflect.apply(originalRequest, this, args);
             const callbackIndex = args.findIndex((arg) => typeof arg === 'function');
             const originalCallback = callbackIndex >= 0 ? args[callbackIndex] : null;
