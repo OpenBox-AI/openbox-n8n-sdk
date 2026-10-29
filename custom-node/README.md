@@ -24,8 +24,12 @@ Create an **OpenBox API** credential in n8n with:
 | **API Key** | Yes | Your OpenBox API key. Live keys start with `obx_live_`; test keys with `obx_test_`. |
 | **Agent DID** | No | Agent decentralised identifier (`did:aip:<uuid>`). Required only for agents with `signing_required = true`. |
 | **Agent Private Key** | No | Base64-encoded raw 32-byte Ed25519 seed. Paired with Agent DID for signed requests. |
+| **Workload Private Key** | No | The agent's workload identity key (RSA, PEM). When set, the node uses the OpenBox v3 API with a short-lived workload token. See [Workload identity (v3)](#workload-identity-v3). |
 
 Get your API key from [dashboard.openbox.ai](https://dashboard.openbox.ai).
+
+The credential test checks the whole chain: with a workload key it bootstraps
+the agent's identity, obtains a workload token and validates it against Core.
 
 ## Usage
 
@@ -148,11 +152,53 @@ Both fail toward *showing too much* rather than too little: an unrecognised
 internal query appears as one stray span you can see and report, instead of
 silently discarding a span you needed.
 
+### Workload identity (v3)
+
+For agents with a workload identity, paste the agent's workload private key
+(PEM) into **Workload Private Key**. The node then:
+
+1. reads the agent's identity authority from Core (`GET /api/v3/auth/bootstrap`);
+2. exchanges a signed client assertion (RS256) for a short-lived workload token
+   at that authority's token endpoint;
+3. sends every governance and approval request to Core's v3 API with the API key
+   and the token in `X-OpenBox-Workload-Token`.
+
+Tokens are cached for at most five minutes and shared across executions. If Core
+rejects one (401/403), it is discarded and the run fails closed, whatever **On API
+Error** says; the next request fetches a new one. If Core has no workload identity
+for the agent, the node keeps using the v1 API. Only Node's built-in `crypto` is
+used, so the package still has no runtime dependencies.
+
 ### Advanced: Agent DID signing
 
 For agents configured with `signing_required = true` in OpenBox, fill in the
 **Agent DID** and **Agent Private Key** fields in the credential. Every request
-to the OpenBox API will be signed with an Ed25519 signature automatically.
+to the OpenBox API will be signed with an Ed25519 signature automatically. A
+**Workload Private Key**, when set, takes precedence: v3 requests carry the
+workload token instead of a DID signature.
+
+### Events
+
+Each run sends `WorkflowStarted`, one `SignalReceived` (`user_prompt`), an
+activity per model call (`llm_call`), tool call and memory operation, and closes
+with `WorkflowCompleted`, or `WorkflowFailed` when the run ended in an error.
+Lifecycle events carry `hook_trigger: false` and a per-run `sequence` number, so
+their order is explicit even when two share a millisecond. The final answer is
+sent as `activity_output`.
+
+Approvals are polled by the run's workflow, run and activity ids. A decision Core
+returns for a *different* approval of the same activity halts the run instead of
+being acted on. When a BLOCK verdict carries a suggested input (`patch`), it is
+added to the error message the model sees.
+
+### OpenRouter provenance
+
+For every OpenRouter call made inside a governed activity, the node reads
+OpenRouter's record of who actually served it (provider, region, model, tokens,
+cost, fallback attempts) and sends it to OpenBox as an `llm_provenance` span on
+that activity. The record is read after the call returns, with the caller's own
+OpenRouter key, and the run waits for it (at most 12 s) before it closes. Set
+`OPENBOX_OPENROUTER_PROVENANCE=false` in n8n's environment to turn it off.
 
 ## Limitations and known issues
 
@@ -184,8 +230,9 @@ indefinitely).
 The node sends the request and response; the OpenBox API decides the span type
 and extracts model and usage. If your deployment does not recognise a provider's
 domain, that provider's calls are classified as plain HTTP and cost and token
-totals stay at zero. This is a server-side gap, not something the node can fix —
-`openrouter.ai` is a known case on older deployments.
+totals stay at zero. This is a server-side gap, not something the node can fix.
+For OpenRouter, the provenance span above carries OpenRouter's own token and
+cost figures either way.
 
 ### Filter caveats
 
@@ -229,7 +276,9 @@ custom-node/
   credentials/
     OpenBoxApi.credentials.ts   the OpenBox API credential
   shared/
-    openbox-client.ts           signed HTTP client for the Core API
+    openbox-client.ts           HTTP client for the Core API (v1 or v3)
+    workload-identity.ts        v3 workload bootstrap, token exchange and cache
+    ignored-urls.ts             URLs the instrumentation never captures
     signing.ts                  Ed25519 request signing
     credential-test.ts          credential connectivity check
     langchain/
@@ -238,6 +287,8 @@ custom-node/
       span_processor.ts         activity scope + span lifecycle
       node_instrumentation.ts   http / db / file patches
       hitl.ts                   human-in-the-loop polling
+      event-sequence.ts         per-run event ordering
+      provenance.ts, residency.ts  OpenRouter routing provenance
       verdict.ts, config.ts, client.ts, error-info.ts, types.ts
   tests/                        vitest suites
   scripts/                      build helpers (clean, copy assets)
