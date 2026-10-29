@@ -23,6 +23,7 @@ import { pollApprovalOrHalt } from './hitl';
 import {
   addIgnoredPrefix,
   clearActivityAbort,
+  drainRoutingAttestations,
   getActivityAbortReason,
   hasActivityAbort,
   isActivityApproved,
@@ -142,6 +143,10 @@ export async function handleAfterAgent(
   failedWith?: Error,
 ): Promise<GovernanceVerdictResponse | null> {
   if (!mw._config.sendChainEndEvent) return null;
+
+  // OpenRouter provenance still being collected belongs to this session:
+  // Core drops spans that arrive after it closes.
+  await drainRoutingAttestations();
 
   const messages = state.messages ?? [];
   let lastContent: unknown = null;

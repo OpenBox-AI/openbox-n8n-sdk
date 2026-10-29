@@ -99,6 +99,9 @@ async function handleBeforeAgent(mw, state, threadId = 'n8n') {
 async function handleAfterAgent(mw, turn, state, failedWith) {
     if (!mw._config.sendChainEndEvent)
         return null;
+    // OpenRouter provenance still being collected belongs to this session:
+    // Core drops spans that arrive after it closes.
+    await (0, span_processor_1.drainRoutingAttestations)();
     const messages = state.messages ?? [];
     let lastContent = null;
     if (messages.length > 0) {
