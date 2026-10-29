@@ -7,9 +7,10 @@
  */
 
 import type { OpenBoxLangChainMiddleware } from './middleware';
-import { GovernanceVerdictResponse, LangChainGovernanceEvent, rfc3339Now } from './types';
+import { GovernanceVerdictResponse, LangChainGovernanceEvent, rfc3339Now, safeSerialize } from './types';
 import { GovernanceBlockedError } from './verdict';
 import { toErrorInfo } from './error-info';
+import { releaseSequencer, sequencerFor } from './event-sequence';
 
 // ── _base_event_fields ────────────────────────────────────────────────────────
 
@@ -71,13 +72,37 @@ export function buildEvent(
   // let a bare string slip past the ErrorInfo typing via this parameter.
   fields: Partial<LangChainGovernanceEvent> = {},
 ): LangChainGovernanceEvent {
-  return {
+  const event = {
     ...baseEventFields(mw, turn),
     event_type: eventType,
     activity_id: activityId,
     activity_type: activityType,
+    // Lifecycle events are never hook events. Sent explicitly so a policy
+    // condition on `hook_trigger = false` matches them.
+    hook_trigger: false,
     ...fields,
   } as LangChainGovernanceEvent;
+
+  // Every lifecycle event is composed here, which makes this the one place
+  // ordering can be guaranteed for a run. See event-sequence.ts for why
+  // wall-clock timestamps alone are not enough.
+  const sequencer = sequencerFor(turn.runId);
+  const violation = sequencer.check(event);
+  if (violation != null) {
+    // Logged, never thrown: an out-of-order event is a display problem, a
+    // dropped one is a governance hole.
+    mw._config.logger.warn(
+      `event sequence violation (${violation.kind}) for ${eventType}/${activityType}`,
+      violation,
+    );
+  }
+  const stamped = sequencer.stamp(event);
+
+  // A closed workflow's state is dead weight in a long-lived process.
+  if (eventType === 'WorkflowCompleted' || eventType === 'WorkflowFailed') {
+    releaseSequencer(turn.runId);
+  }
+  return stamped;
 }
 
 // ── _evaluate ─────────────────────────────────────────────────────────────────
@@ -102,11 +127,23 @@ export async function sendOrphanClosure(
   activityId: string,
   activityType: string,
   err: unknown,
+  /**
+   * What the closure must carry so a policy sees the same facts it saw when it
+   * refused the start. Without it, an activity refused at its start closes on
+   * a fresh evaluation with nothing to object to, and the record reads
+   * BLOCK … ALLOW for one activity in which nothing changed.
+   */
+  extra: Partial<LangChainGovernanceEvent> = {},
 ): Promise<void> {
+  const info = toErrorInfo(err);
   try {
     await evaluate(mw, buildEvent(mw, turn, completedEventType, activityId, activityType, {
       status: 'failed',
-      error: toErrorInfo(err),
+      error: info,
+      // Why this row failed, in the field the dashboard shows: Core copies
+      // `activity_output` into the event's output for every event type.
+      activity_output: safeSerialize({ result: info.message }),
+      ...extra,
     }));
   } catch {
     // non-fatal — closure telemetry must not mask the original error

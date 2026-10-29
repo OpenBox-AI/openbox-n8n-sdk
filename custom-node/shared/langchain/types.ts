@@ -81,6 +81,11 @@ export interface LangChainGovernanceEvent {
   tool_type?: string;
   // OTel hook layer (Layer 2) — mirrors Python SDK hook_governance._build_payload()
   hook_trigger?: boolean;
+  /**
+   * Position of this event within its run, 1-based and gapless. Makes the
+   * order explicit rather than inferred from timestamps that can tie.
+   */
+  sequence?: number;
   [key: string]: unknown;
 }
 

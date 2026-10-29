@@ -23,6 +23,7 @@ exports.extractResponseMetadata = extractResponseMetadata;
 const types_1 = require("./types");
 const verdict_1 = require("./verdict");
 const error_info_1 = require("./error-info");
+const event_sequence_1 = require("./event-sequence");
 /**
  * Recover the turn identity from an error thrown by beforeAgent(). Governance
  * failures (block/halt, or a hard API error) can throw before beforeAgent
@@ -60,13 +61,32 @@ function buildEvent(mw, turn, eventType, activityId, activityType,
 // would in a direct object literal — a plain Record<string, unknown> would
 // let a bare string slip past the ErrorInfo typing via this parameter.
 fields = {}) {
-    return {
+    const event = {
         ...baseEventFields(mw, turn),
         event_type: eventType,
         activity_id: activityId,
         activity_type: activityType,
+        // Lifecycle events are never hook events. Sent explicitly so a policy
+        // condition on `hook_trigger = false` matches them.
+        hook_trigger: false,
         ...fields,
     };
+    // Every lifecycle event is composed here, which makes this the one place
+    // ordering can be guaranteed for a run. See event-sequence.ts for why
+    // wall-clock timestamps alone are not enough.
+    const sequencer = (0, event_sequence_1.sequencerFor)(turn.runId);
+    const violation = sequencer.check(event);
+    if (violation != null) {
+        // Logged, never thrown: an out-of-order event is a display problem, a
+        // dropped one is a governance hole.
+        mw._config.logger.warn(`event sequence violation (${violation.kind}) for ${eventType}/${activityType}`, violation);
+    }
+    const stamped = sequencer.stamp(event);
+    // A closed workflow's state is dead weight in a long-lived process.
+    if (eventType === 'WorkflowCompleted' || eventType === 'WorkflowFailed') {
+        (0, event_sequence_1.releaseSequencer)(turn.runId);
+    }
+    return stamped;
 }
 // ── _evaluate ─────────────────────────────────────────────────────────────────
 async function evaluate(mw, event) {
@@ -78,11 +98,23 @@ async function evaluate(mw, event) {
  * caller rethrows a gate-enforcement error. Best-effort — a failure here must
  * never mask the original governance error.
  */
-async function sendOrphanClosure(mw, turn, completedEventType, activityId, activityType, err) {
+async function sendOrphanClosure(mw, turn, completedEventType, activityId, activityType, err, 
+/**
+ * What the closure must carry so a policy sees the same facts it saw when it
+ * refused the start. Without it, an activity refused at its start closes on
+ * a fresh evaluation with nothing to object to, and the record reads
+ * BLOCK … ALLOW for one activity in which nothing changed.
+ */
+extra = {}) {
+    const info = (0, error_info_1.toErrorInfo)(err);
     try {
         await evaluate(mw, buildEvent(mw, turn, completedEventType, activityId, activityType, {
             status: 'failed',
-            error: (0, error_info_1.toErrorInfo)(err),
+            error: info,
+            // Why this row failed, in the field the dashboard shows: Core copies
+            // `activity_output` into the event's output for every event type.
+            activity_output: (0, types_1.safeSerialize)({ result: info.message }),
+            ...extra,
         }));
     }
     catch {

@@ -70,7 +70,10 @@ async function handleBeforeAgent(mw, state, threadId = 'n8n') {
                     }
                 }
                 catch (err) {
-                    await (0, hooks_1.sendOrphanClosure)(mw, turn, 'ActivityCompleted', sigActivityId, 'user_prompt', err);
+                    await (0, hooks_1.sendOrphanClosure)(mw, turn, 'ActivityCompleted', sigActivityId, 'user_prompt', err, {
+                        signal_name: 'user_prompt',
+                        signal_args: [userPrompt],
+                    });
                     throw err;
                 }
             }
@@ -102,8 +105,18 @@ async function handleAfterAgent(mw, turn, state, failedWith) {
         const lastMsg = messages[messages.length - 1];
         lastContent = lastMsg?.content ?? null;
     }
-    const verdict = await (0, hooks_1.evaluate)(mw, (0, hooks_1.buildEvent)(mw, turn, 'WorkflowCompleted', `${turn.runId}-wf`, mw._workflowType, {
-        workflow_output: (0, types_1.safeSerialize)({ result: lastContent }),
+    const output = (0, types_1.safeSerialize)({ result: lastContent });
+    // A run that ended in an error closes as `WorkflowFailed`, not
+    // `WorkflowCompleted` with `status: 'failed'`: Core derives the session's
+    // status from the event type alone, so the latter recorded a failed run as
+    // a clean success.
+    const eventType = failedWith ? 'WorkflowFailed' : 'WorkflowCompleted';
+    const verdict = await (0, hooks_1.evaluate)(mw, (0, hooks_1.buildEvent)(mw, turn, eventType, `${turn.runId}-wf`, mw._workflowType, {
+        // `activity_output` is the key Core binds (its payload has no
+        // workflow_output field, so the final answer used to be dropped);
+        // `workflow_output` is kept for anything reading the raw event stream.
+        activity_output: output,
+        workflow_output: output,
         status: failedWith ? 'failed' : 'completed',
         ...(failedWith ? { error: (0, error_info_1.toErrorInfo)(failedWith) } : {}),
     }));
@@ -154,7 +167,10 @@ async function handleWrapModelCall(mw, turn, messages, handler) {
         }
         catch (err) {
             if (mw._config.sendLlmEndEvent) {
-                await (0, hooks_1.sendOrphanClosure)(mw, turn, 'LLMCompleted', activityId, 'llm_call', err);
+                await (0, hooks_1.sendOrphanClosure)(mw, turn, 'LLMCompleted', activityId, 'llm_call', err, {
+                    activity_input: [{ prompt: promptText }],
+                    prompt: promptText,
+                });
             }
             throw err;
         }

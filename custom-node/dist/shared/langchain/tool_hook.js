@@ -47,7 +47,11 @@ async function handleWrapToolCall(mw, turn, toolName, toolArgs, handler) {
                 // completion event sent at all — a true orphan on Core. Close it
                 // with the same activity id before rethrowing.
                 if (mw._config.sendToolEndEvent) {
-                    await (0, hooks_1.sendOrphanClosure)(mw, turn, 'ToolCompleted', activityId, toolName, err);
+                    await (0, hooks_1.sendOrphanClosure)(mw, turn, 'ToolCompleted', activityId, toolName, err, {
+                        activity_input: [(0, types_1.safeSerialize)(toolArgs)],
+                        tool_name: toolName,
+                        tool_type: toolType,
+                    });
                 }
                 throw err;
             }

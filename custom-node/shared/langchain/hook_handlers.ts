@@ -107,7 +107,10 @@ export async function handleBeforeAgent(
             await pollApprovalOrHalt(mw, turn, sigActivityId, 'user_prompt', result.approvalId);
           }
         } catch (err) {
-          await sendOrphanClosure(mw, turn, 'ActivityCompleted', sigActivityId, 'user_prompt', err);
+          await sendOrphanClosure(mw, turn, 'ActivityCompleted', sigActivityId, 'user_prompt', err, {
+            signal_name: 'user_prompt',
+            signal_args: [userPrompt],
+          });
           throw err;
         }
       }
@@ -147,8 +150,20 @@ export async function handleAfterAgent(
     lastContent = lastMsg?.content ?? null;
   }
 
-  const verdict = await evaluate(mw, buildEvent(mw, turn, 'WorkflowCompleted', `${turn.runId}-wf`, mw._workflowType, {
-    workflow_output: safeSerialize({ result: lastContent }),
+  const output = safeSerialize({ result: lastContent });
+
+  // A run that ended in an error closes as `WorkflowFailed`, not
+  // `WorkflowCompleted` with `status: 'failed'`: Core derives the session's
+  // status from the event type alone, so the latter recorded a failed run as
+  // a clean success.
+  const eventType = failedWith ? 'WorkflowFailed' : 'WorkflowCompleted';
+
+  const verdict = await evaluate(mw, buildEvent(mw, turn, eventType, `${turn.runId}-wf`, mw._workflowType, {
+    // `activity_output` is the key Core binds (its payload has no
+    // workflow_output field, so the final answer used to be dropped);
+    // `workflow_output` is kept for anything reading the raw event stream.
+    activity_output: output,
+    workflow_output: output,
     status: failedWith ? 'failed' : 'completed',
     ...(failedWith ? { error: toErrorInfo(failedWith) } : {}),
   }));
@@ -209,7 +224,10 @@ export async function handleWrapModelCall(
       }
     } catch (err) {
       if (mw._config.sendLlmEndEvent) {
-        await sendOrphanClosure(mw, turn, 'LLMCompleted', activityId, 'llm_call', err);
+        await sendOrphanClosure(mw, turn, 'LLMCompleted', activityId, 'llm_call', err, {
+          activity_input: [{ prompt: promptText }],
+          prompt: promptText,
+        });
       }
       throw err;
     }
