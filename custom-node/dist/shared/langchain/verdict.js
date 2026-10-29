@@ -8,6 +8,8 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GuardrailsValidationError = exports.GovernanceBlockedError = exports.GovernanceHaltError = void 0;
+exports.patchFrom = patchFrom;
+exports.withPatchHint = withPatchHint;
 exports.unwrapGovernanceError = unwrapGovernanceError;
 exports.formatActivityRejectedMessage = formatActivityRejectedMessage;
 exports.awaitedApprovalId = awaitedApprovalId;
@@ -23,13 +25,47 @@ class GovernanceHaltError extends Error {
 exports.GovernanceHaltError = GovernanceHaltError;
 class GovernanceBlockedError extends Error {
     verdict;
-    constructor(verdict, message) {
+    /** The remediation directive Core sent with this block, if any. */
+    patch;
+    constructor(verdict, message, patch = null) {
         super(message);
         this.name = 'GovernanceBlockedError';
         this.verdict = verdict;
+        this.patch = patch;
     }
 }
 exports.GovernanceBlockedError = GovernanceBlockedError;
+/**
+ * Read a patch off a verdict or approval-poll response, if it carries a usable
+ * one. Core has already validated the shape; a body that is not an object
+ * degrades to "no directive", as it does on Core.
+ */
+function patchFrom(response) {
+    const patch = response?.patch;
+    if (patch == null || typeof patch !== 'object' || Array.isArray(patch))
+        return null;
+    return patch;
+}
+/**
+ * Append the policy's suggested input to a block message. The message is what
+ * reaches the model when a governed call is blocked, so the model can retry
+ * with it — and that retry is governed again. The node never applies the patch
+ * itself.
+ */
+function withPatchHint(message, patch) {
+    if (patch == null || !('new_input' in patch))
+        return message;
+    let suggestion;
+    try {
+        suggestion = JSON.stringify(patch.new_input);
+    }
+    catch {
+        return message;
+    }
+    if (suggestion === undefined)
+        return message;
+    return `${message} — policy suggests retrying with: ${suggestion}`;
+}
 class GuardrailsValidationError extends Error {
     reasons;
     constructor(reasons) {
@@ -118,7 +154,8 @@ function enforceVerdict(response, phase) {
         throw new GovernanceHaltError(`OpenBox governance halt at ${phase}: ${response.reason ?? 'halted by policy'}`);
     }
     if (arm === 'block') {
-        throw new GovernanceBlockedError('block', `OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`);
+        const patch = patchFrom(response);
+        throw new GovernanceBlockedError('block', withPatchHint(`OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`, patch), patch);
     }
     const guardrails = response.guardrails_result ?? response.guardrailsResult;
     if (guardrails && guardrails.validation_passed === false) {

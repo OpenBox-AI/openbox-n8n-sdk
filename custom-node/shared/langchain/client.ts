@@ -10,7 +10,7 @@
 import { IExecuteFunctions } from 'n8n-workflow';
 
 import { openboxRequest, SoftGovernanceError } from '../openbox-client';
-import { GovernanceVerdictResponse, LangChainGovernanceEvent } from './types';
+import { GovernancePatch, GovernanceVerdictResponse, LangChainGovernanceEvent } from './types';
 
 export type OnApiError = 'fail_open' | 'fail_closed';
 
@@ -55,6 +55,8 @@ export interface ApprovalPollResponse {
   approval_expiration_time?: string;
   approvalExpirationTime?: string;
   expired?: boolean;
+  /** Remediation directive Core sends with a rejection (BLOCK). */
+  patch?: GovernancePatch;
   [key: string]: unknown;
 }
 

@@ -44,7 +44,9 @@ async function pollApprovalOrHalt(mw, turn, activityId, activityType, approvalId
         if (verdict === 'allow')
             return;
         if (verdict === 'block' || verdict === 'halt') {
-            throw new verdict_1.GovernanceHaltError((0, verdict_1.formatActivityRejectedMessage)(response.reason));
+            // A rejection stays terminal; the directive is still carried in the
+            // message for whoever reads the trail.
+            throw new verdict_1.GovernanceHaltError((0, verdict_1.withPatchHint)((0, verdict_1.formatActivityRejectedMessage)(response.reason), (0, verdict_1.patchFrom)(response)));
         }
         await sleep(mw._config.hitl.pollIntervalMs);
     }

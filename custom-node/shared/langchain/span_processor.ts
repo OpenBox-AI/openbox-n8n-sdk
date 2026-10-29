@@ -44,7 +44,9 @@ import {
   awaitedApprovalId,
   formatActivityRejectedMessage,
   isDecisionForAnotherApproval,
+  patchFrom,
   verdictFromString,
+  withPatchHint,
 } from './verdict';
 
 function sleep(ms: number): Promise<void> {
@@ -478,9 +480,10 @@ async function enforceHookVerdict(
   }
 
   if (verdict === 'block' || verdict === 'halt') {
-    const reason = response.reason ?? 'Blocked by governance';
+    const patch = patchFrom(response);
+    const reason = withPatchHint(response.reason ?? 'Blocked by governance', patch);
     _activityAbort.set(activityId, reason);
-    throw new GovernanceBlockedError(verdict, `${reason} (${identifier})`);
+    throw new GovernanceBlockedError(verdict, `${reason} (${identifier})`, patch);
   }
 }
 

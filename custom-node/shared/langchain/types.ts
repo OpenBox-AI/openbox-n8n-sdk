@@ -15,7 +15,20 @@ export interface GuardrailsResult {
   [key: string]: unknown;
 }
 
+/**
+ * The optional remediation directive Core attaches to a BLOCK verdict
+ * (policy-produced, or written by a reviewer). Core's contract: an object with
+ * exactly the key `new_input`; malformed or oversized patches are dropped by
+ * Core. It is a hint, not an instruction the node executes.
+ */
+export interface GovernancePatch {
+  new_input?: unknown;
+  [key: string]: unknown;
+}
+
 export interface GovernanceVerdictResponse {
+  /** Remediation directive; present only on a BLOCK. See `GovernancePatch`. */
+  patch?: GovernancePatch;
   arm?: VerdictArm;
   verdict?: string;
   action?: string;

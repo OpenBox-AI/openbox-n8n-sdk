@@ -6,7 +6,7 @@
  * here for structural completeness even though n8n skips the OTel layer.
  */
 
-import { GovernanceVerdictResponse, VerdictArm } from './types';
+import { GovernancePatch, GovernanceVerdictResponse, VerdictArm } from './types';
 
 export class GovernanceHaltError extends Error {
   constructor(message: string) {
@@ -17,11 +17,43 @@ export class GovernanceHaltError extends Error {
 
 export class GovernanceBlockedError extends Error {
   verdict: VerdictArm;
-  constructor(verdict: VerdictArm, message: string) {
+  /** The remediation directive Core sent with this block, if any. */
+  patch: GovernancePatch | null;
+  constructor(verdict: VerdictArm, message: string, patch: GovernancePatch | null = null) {
     super(message);
     this.name = 'GovernanceBlockedError';
     this.verdict = verdict;
+    this.patch = patch;
   }
+}
+
+/**
+ * Read a patch off a verdict or approval-poll response, if it carries a usable
+ * one. Core has already validated the shape; a body that is not an object
+ * degrades to "no directive", as it does on Core.
+ */
+export function patchFrom(response: { patch?: unknown } | null | undefined): GovernancePatch | null {
+  const patch = response?.patch;
+  if (patch == null || typeof patch !== 'object' || Array.isArray(patch)) return null;
+  return patch as GovernancePatch;
+}
+
+/**
+ * Append the policy's suggested input to a block message. The message is what
+ * reaches the model when a governed call is blocked, so the model can retry
+ * with it — and that retry is governed again. The node never applies the patch
+ * itself.
+ */
+export function withPatchHint(message: string, patch: GovernancePatch | null): string {
+  if (patch == null || !('new_input' in patch)) return message;
+  let suggestion: string | undefined;
+  try {
+    suggestion = JSON.stringify(patch.new_input);
+  } catch {
+    return message;
+  }
+  if (suggestion === undefined) return message;
+  return `${message} — policy suggests retrying with: ${suggestion}`;
 }
 
 export class GuardrailsValidationError extends Error {
@@ -135,9 +167,11 @@ export function enforceVerdict(
     );
   }
   if (arm === 'block') {
+    const patch = patchFrom(response);
     throw new GovernanceBlockedError(
       'block',
-      `OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`,
+      withPatchHint(`OpenBox governance block at ${phase}: ${response.reason ?? 'blocked by policy'}`, patch),
+      patch,
     );
   }
 

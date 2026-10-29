@@ -392,9 +392,10 @@ async function enforceHookVerdict(entry, response, identifier) {
         return;
     }
     if (verdict === 'block' || verdict === 'halt') {
-        const reason = response.reason ?? 'Blocked by governance';
+        const patch = (0, verdict_1.patchFrom)(response);
+        const reason = (0, verdict_1.withPatchHint)(response.reason ?? 'Blocked by governance', patch);
         _activityAbort.set(activityId, reason);
-        throw new verdict_1.GovernanceBlockedError(verdict, `${reason} (${identifier})`);
+        throw new verdict_1.GovernanceBlockedError(verdict, `${reason} (${identifier})`, patch);
     }
 }
 function patchFetch() {

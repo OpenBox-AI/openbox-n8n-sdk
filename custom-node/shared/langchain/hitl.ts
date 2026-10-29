@@ -4,7 +4,9 @@ import {
   GovernanceHaltError,
   formatActivityRejectedMessage,
   isDecisionForAnotherApproval,
+  patchFrom,
   verdictFromString,
+  withPatchHint,
 } from './verdict';
 
 const _timersMod = 'timers';
@@ -72,7 +74,11 @@ export async function pollApprovalOrHalt(
 
     if (verdict === 'allow') return;
     if (verdict === 'block' || verdict === 'halt') {
-      throw new GovernanceHaltError(formatActivityRejectedMessage(response.reason));
+      // A rejection stays terminal; the directive is still carried in the
+      // message for whoever reads the trail.
+      throw new GovernanceHaltError(
+        withPatchHint(formatActivityRejectedMessage(response.reason), patchFrom(response)),
+      );
     }
 
     await sleep(mw._config.hitl.pollIntervalMs);
